@@ -252,6 +252,46 @@ export const ANDROID_DEVICE_INIT_COMMAND = [
   ANDROID_DEVICE_INIT_SCRIPT,
 ] as const;
 
+/**
+ * C-833: which of the given loopback adb server ports lists the serial
+ * (argv, never code). Only the adb host protocol's `host:devices` is sent:
+ * nothing is started, stopped or claimed. Prints `{"port": <port>|null}`.
+ */
+export const ANDROID_DEVICE_HOLDER_SCRIPT = `import json,socket,sys
+serial=sys.argv[1]
+ports=[p for p in json.loads(sys.argv[2]) if isinstance(p,int)][:32]
+def recvn(c,n):
+ b=b''
+ while len(b)<n:
+  d=c.recv(n-len(b))
+  if not d: raise OSError()
+  b+=d
+ return b
+def listing(p):
+ try:
+  c=socket.create_connection(('127.0.0.1',p),0.5); c.settimeout(1)
+ except OSError:
+  return ''
+ try:
+  c.sendall(b'000chost:devices')
+  if recvn(c,4)!=b'OKAY': return ''
+  return recvn(c,int(recvn(c,4),16)).decode('utf-8','replace')
+ except (OSError,ValueError):
+  return ''
+ finally:
+  c.close()
+found=next((p for p in ports if any(l.split()[:1]==[serial] for l in listing(p).splitlines())),None)
+print(json.dumps(dict(port=found)),flush=True)
+`;
+
+export const ANDROID_DEVICE_HOLDER_COMMAND = [
+  "python3",
+  "-I",
+  "-B",
+  "-c",
+  ANDROID_DEVICE_HOLDER_SCRIPT,
+] as const;
+
 const STATES: Readonly<Record<string, DeviceObservation["state"]>> = {
   device: "available",
   unauthorized: "unauthorized",
@@ -330,6 +370,29 @@ export const androidDeviceProvider: HostDeviceProvider = {
     if (!result.ok) return undefined;
     try {
       return JSON.parse(result.output) as unknown;
+    } catch {
+      return undefined;
+    }
+  },
+  async holder({ execution, os, probe, signal }, device, ports) {
+    if (
+      device.type !== ANDROID_DEVICE_TYPE ||
+      !DEVICE_ID_PATTERN.test(device.id) ||
+      !ports.length
+    )
+      return undefined;
+    const result = await probe(
+      execution,
+      os,
+      [...ANDROID_DEVICE_HOLDER_COMMAND, device.id, JSON.stringify(ports)],
+      signal,
+    );
+    if (!result.ok) return undefined;
+    try {
+      const port = (JSON.parse(result.output) as { port?: unknown }).port;
+      return typeof port === "number" && ports.includes(port)
+        ? port
+        : undefined;
     } catch {
       return undefined;
     }

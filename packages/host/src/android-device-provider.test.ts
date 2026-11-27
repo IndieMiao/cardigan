@@ -9,6 +9,8 @@ import {
 } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import {
+  ANDROID_DEVICE_HOLDER_COMMAND,
+  ANDROID_DEVICE_HOLDER_SCRIPT,
   ANDROID_DEVICE_INIT_COMMAND,
   ANDROID_DEVICE_INIT_SCRIPT,
   ANDROID_DEVICE_INIT_STEPS,
@@ -326,3 +328,90 @@ test("C-817: the initialization script installs, removes, resets or reboots noth
     "关闭锁屏",
   ]);
 });
+
+const LISTING_SERVER = `import socket,sys
+serials=sys.argv[1:]
+ls=socket.socket(); ls.bind(('127.0.0.1',0)); ls.listen(8)
+print(ls.getsockname()[1],flush=True)
+while True:
+ c,_=ls.accept()
+ try:
+  n=int(c.recv(4),16); svc=c.recv(n)
+  if svc==b'host:devices':
+   b=''.join('%s\\tdevice\\n'%s for s in serials).encode(); c.sendall(b'OKAY'+b'%04x'%len(b)+b)
+ except (OSError,ValueError):
+  pass
+ c.close()
+`;
+
+test("C-833: the real holder script names the adb server port that lists the device, and only asks", async () => {
+  const servers = [["emulator-5590"], ["OTHER", TABLET.id]].map((serials) =>
+    spawn("python3", ["-I", "-c", LISTING_SERVER, ...serials], {
+      stdio: ["ignore", "pipe", "inherit"],
+    }),
+  );
+  try {
+    const ports = await Promise.all(
+      servers.map(
+        (s) =>
+          new Promise<number>((resolve) =>
+            s.stdout?.once("data", (d: Buffer) => resolve(Number(String(d)))),
+          ),
+      ),
+    );
+    const run = (serial: string, candidates: number[]) =>
+      new Promise<unknown>((resolve, reject) => {
+        const child = spawn(
+          "python3",
+          [
+            ...ANDROID_DEVICE_HOLDER_COMMAND.slice(1),
+            serial,
+            JSON.stringify(candidates),
+          ],
+          { stdio: ["ignore", "pipe", "inherit"] },
+        );
+        let out = "";
+        child.stdout.on("data", (b: Buffer) => {
+          out += b.toString();
+        });
+        child.once("error", reject);
+        child.once("close", () => resolve(JSON.parse(out)));
+      });
+    // A closed port in between is skipped.
+    expect(await run(TABLET.id, [1, ...ports])).toEqual({ port: ports[1] });
+    expect(await run("MISSING", ports)).toEqual({ port: null });
+    expect(ANDROID_DEVICE_HOLDER_SCRIPT).not.toMatch(
+      /kill|start-server|subprocess|transport|shell:/,
+    );
+    // The provider passes the ports as argv and accepts only one of them.
+    const probe = vi.fn<CapabilityProbe>(async () => ({
+      ok: true,
+      output: JSON.stringify({ port: 5137 }),
+    }));
+    const target = {
+      execution: { mode: "local" as const, dataDir: "/" },
+      os: "darwin",
+      probe,
+    };
+    expect(
+      await androidDeviceProvider.holder?.(target, TABLET, [15100, 5137]),
+    ).toBe(5137);
+    expect(probe.mock.calls[0]?.[2]).toEqual([
+      ...ANDROID_DEVICE_HOLDER_COMMAND,
+      TABLET.id,
+      "[15100,5137]",
+    ]);
+    expect(
+      await androidDeviceProvider.holder?.(target, TABLET, [15100]),
+    ).toBeUndefined();
+    expect(
+      await androidDeviceProvider.holder?.(
+        target,
+        { ...TABLET, id: "bad id" },
+        [5137],
+      ),
+    ).toBeUndefined();
+  } finally {
+    for (const s of servers) s.kill("SIGKILL");
+  }
+}, 20_000);

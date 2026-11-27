@@ -4422,6 +4422,69 @@ test("C-497 priority project takes the next free slot ahead of an earlier borrow
   expect(runtime.wake).toHaveBeenCalledOnce();
 });
 
+test.each([
+  ["launched before the switch", false],
+  ["launched with the current environment", true],
+])(
+  "C-833 an idle session %s on a machine handing out adb slots: replaced at its next wake only when launched before",
+  async (_label, recorded) => {
+    await writeFile(
+      join(f.dataDir, "run-capacity.yaml"),
+      JSON.stringify({
+        machines: {
+          local: {
+            resources: { godot: 1 },
+            adb_slots: { resources: ["godot"], adb_port_base: 15100 },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const { loadRunCapacityConfig, MachineLeases } = await import(
+      "@cardigan/host"
+    );
+    const cfg = await loadRunCapacityConfig({ configDir: f.dataDir });
+    const leases = new MachineLeases(f.store, cfg, vi.fn());
+    const launched = f
+      .state()
+      .runs.find((r) => r.assignment_id === target.assignment.id);
+    if (!launched) throw new Error("missing session Run");
+    f.store.uow.run((tx) => {
+      const a = tx.assignments.get(f.project, target.assignment.id);
+      if (!a?.runtime_ref) throw new Error("missing session");
+      tx.assignments.put(f.project, {
+        ...a,
+        runtime_ref: {
+          ...a.runtime_ref,
+          launch_generation: { run_id: launched.id, generation: "g1" },
+        },
+      });
+    });
+    if (recorded)
+      leases.sessions.record(f.project, "local", launched.id, f.clock.now());
+    comment();
+    await new Dispatcher({
+      ...options,
+      leases,
+      runLimit: cfg.forMachine,
+    }).tick();
+    if (recorded) {
+      expect(runtime.wake).toHaveBeenCalledOnce();
+      expect(options.startRun).not.toHaveBeenCalled();
+    } else {
+      // The new session gets its launch environment (adb disabled here).
+      expect(runtime.wake).not.toHaveBeenCalled();
+      expect(options.startRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          replacement: expect.objectContaining({
+            reason: "resource_isolation",
+          }),
+        }),
+      );
+    }
+  },
+);
+
 test.each(["preparation", "backoff", "send slot"])(
   "C-497 a lost mount during %s does not publish or consume retries while waiting",
   async (stage) => {

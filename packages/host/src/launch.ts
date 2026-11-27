@@ -1817,6 +1817,8 @@ export function launchDevices(
   now: string = new Date().toISOString(),
 ): Pick<CompileAssignmentInput, "adb_slot" | "device_session"> {
   if (!leases) return {};
+  // C-833: the session launched now carries the machine's adb environment.
+  leases.sessions.record(project, machine, run, now);
   const policy = leases.config.adbSlots(machine);
   const slot = policy
     ? (leases.adb.launchSlot(project, machine, run) ?? null)

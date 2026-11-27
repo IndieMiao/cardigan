@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import {
   type ActionCommand,
   alternativeCapabilities,
+  type DeviceHolder,
   type DeviceObservation,
   deviceCapabilities,
   type Machine,
@@ -22,6 +23,8 @@ import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
+import { adbServerHolders } from "./adb-sessions.js";
+import { usbDeviceTypes } from "./adb-slots.js";
 import { agentToolsCapability } from "./agent-tools.js";
 import {
   type AgentToolsOutcome,
@@ -52,6 +55,7 @@ import {
   readinessReachable,
   recordReadiness,
 } from "./machine-readiness.js";
+import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import {
   RuntimeTargetError,
   safeTargetReason,
@@ -94,12 +98,30 @@ export interface MachineObservationOptions {
   readonly probe?: CapabilityProbe;
   /** C-813: device providers to list; all of them by default only with the production catalog. */
   readonly deviceProviders?: readonly HostDeviceProvider[];
+  /**
+   * C-833: adb servers that may hold a device an initialization cannot see;
+   * by default read from the host's run-capacity configuration.
+   */
+  readonly adbHolders?: (machine: string) => Promise<readonly DeviceHolder[]>;
   /** C-608 readiness patrol; on by default only with the production catalog. */
   readonly readiness?: (input: ReadinessInput) => Promise<ReadinessOutcome>;
   readonly env?: NodeJS.ProcessEnv;
   readonly now?: () => string;
   readonly signal?: AbortSignal;
 }
+/** C-833: holders from the trusted run-capacity configuration. */
+async function defaultAdbHolders(
+  store: Store,
+  machine: string,
+  env: NodeJS.ProcessEnv | undefined,
+) {
+  const config = await loadRunCapacityConfig(env ? { env } : {});
+  const policy = config.adbSlots(machine);
+  return adbServerHolders(store, config, machine, () =>
+    policy ? usbDeviceTypes(policy) : [],
+  );
+}
+
 /** Shared by the background patrol, machine check, and worker onboarding. */
 export async function refreshMachineObservations(
   options: MachineObservationOptions,
@@ -282,6 +304,10 @@ export async function refreshMachineObservations(
             ...(options.signal ? { signal: options.signal } : {}),
           },
           now,
+          holders: () =>
+            options.adbHolders
+              ? options.adbHolders(machine)
+              : defaultAdbHolders(store, machine, options.env),
         });
         enabled = outcome.enabled;
         if (outcome.changed) devicesChanged = true;

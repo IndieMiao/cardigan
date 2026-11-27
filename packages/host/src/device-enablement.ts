@@ -1,9 +1,11 @@
 import {
   type Clock,
+  type DeviceHolder,
   type DeviceObservation,
   type DeviceRegistration,
   deviceActionKey,
   deviceEnabledFor,
+  deviceHeldReason,
   deviceResourceName,
   deviceUnavailableReason,
   normalizeDeviceInitResult,
@@ -56,6 +58,8 @@ export async function observeProviderDevices(input: {
   readonly complete: boolean;
   readonly target: HostDeviceTarget;
   readonly now: () => string;
+  /** C-833: adb servers that may hold a device this listing did not see. */
+  readonly holders?: () => Promise<readonly DeviceHolder[]>;
 }): Promise<DeviceCheckOutcome> {
   const { store, project, machine, provider, listed, target, now } = input;
   const registry = new DeviceRegistry(store);
@@ -80,13 +84,19 @@ export async function observeProviderDevices(input: {
       outcome = normalizeDeviceInitResult(raw, provider.init_steps ?? []);
       if (outcome.ok && !outcome.version && seen.version)
         outcome = { ...outcome, version: seen.version };
-    } else
+    } else {
       outcome = normalizeDeviceInitResult(
         {
           result: seen?.state === "unauthorized" ? "unauthorized" : "not_found",
         },
         [],
       );
+      // C-833: another adb server may hold it; name that server and session.
+      if (seen?.state !== "unauthorized") {
+        const holder = await deviceHolder(provider, target, reg, input.holders);
+        if (holder) outcome = { ok: false, reason: deviceHeldReason(holder) };
+      }
+    }
     if (registry.finishInit(machine, reg.type, reg.id, claim, outcome, now()))
       changed = true;
   }
@@ -94,6 +104,26 @@ export async function observeProviderDevices(input: {
     deviceEnabledFor(registry.get(machine, d.type, d.id), project),
   );
   return { changed, enabled };
+}
+
+async function deviceHolder(
+  provider: HostDeviceProvider,
+  target: HostDeviceTarget,
+  reg: DeviceRegistration,
+  holders: (() => Promise<readonly DeviceHolder[]>) | undefined,
+) {
+  if (!provider.holder || !holders) return undefined;
+  try {
+    const candidates = await holders();
+    const port = await provider.holder(
+      target,
+      reg,
+      candidates.map((h) => h.port),
+    );
+    return candidates.find((h) => h.port === port);
+  } catch {
+    return undefined;
+  }
 }
 
 const label = (reg: DeviceRegistration) =>

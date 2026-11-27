@@ -1,5 +1,5 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { Socket } from "node:net";
 import { arch, platform, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,12 +11,14 @@ import {
   fixture,
   run,
 } from "../../domain/src/commands/test-fixtures.js";
+import { adbServerHolders, sessionLabel } from "./adb-sessions.js";
 import {
   type AdbProbe,
   type AdbProbeContext,
   adbTargetProbe,
 } from "./adb-slot-probe.js";
 import { adbEnvironmentWarnings } from "./adb-slots.js";
+import { launchDevices } from "./launch.js";
 import { MachineLeases } from "./resource-leases.js";
 import { type ResourceProbe, targetProbe } from "./resource-probe.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
@@ -503,3 +505,373 @@ test("the real script closes only this slot's adb server and emulator; the other
   );
   expect(await echo({ ...context, action: "release" })).toBeUndefined();
 }, 20_000);
+
+// ---- C-833: legacy servers holding USB devices --------------------------
+
+const deviceSlots = {
+  resources: ["android.emulator", "godot", "android.device"],
+  adb_port_base: 15100,
+  emulator_port_base: 5600,
+  legacy_adb_ports: [5137],
+};
+const deviceResources = {
+  resources: { "android.emulator": 2, godot: 2, other: 1, "android.device": 1 },
+};
+type UsbReply = Awaited<ReturnType<AdbProbe>>;
+function usbProbe(usbOff: () => UsbReply | undefined) {
+  const adb = vi.fn<AdbProbe>(async (c) =>
+    c.action === "usb_off"
+      ? usbOff()
+      : { target: "target-1", found: 0, left: 0 },
+  );
+  const probe = Object.assign(
+    vi.fn(async () => "target-1"),
+    { adb },
+  ) as unknown as ResourceProbe;
+  return { probe, adb };
+}
+const restarted = {
+  target: "target-1",
+  found: 1,
+  left: 0,
+  foreign: 0,
+  reconnected: 1,
+  missing: 0,
+};
+
+test("C-833: while a session from before the switch may use the legacy port, its USB-holding server is restarted with ADB_USB=0, not closed", async () => {
+  const { probe, adb } = usbProbe(() => restarted);
+  const l = new MachineLeases(
+    store,
+    await config(deviceSlots, deviceResources),
+    probe,
+  );
+  needs(2, ["godot"]);
+  setStatus({ ...run(2), status: "queued" } as Run, { status: "running" });
+  await l.adb.reconcile("first", () => at);
+  const calls = adb.mock.calls.map(([c]) => c);
+  expect(calls.filter((c) => c.action === "usb_off")).toEqual([
+    expect.objectContaining({
+      adb_ports: [5137],
+      emulator_ports: [],
+      generation: expect.any(String),
+    }),
+  ]);
+  // The legacy port is not closed while the old Run may still use it.
+  expect(
+    calls.filter((c) => c.action === "release" && c.adb_ports.includes(5137)),
+  ).toEqual([]);
+  const released = events("machine_adb_legacy_usb_released");
+  expect(released).toHaveLength(1);
+  expect(released[0]?.payload).toEqual({
+    machine: "local",
+    legacy: true,
+    restarted: 1,
+    failed: 0,
+    reconnected: 1,
+    missing: 0,
+  });
+  expect(JSON.stringify(released)).not.toContain("5137");
+});
+
+test("C-833: no USB restart without android.device in the slots, and an unanswered restart is retried before the sweep interval", async () => {
+  let reply: UsbReply | undefined;
+  const { probe, adb } = usbProbe(() => reply);
+  const plain = new MachineLeases(
+    store,
+    await config({ ...slots, legacy_adb_ports: [5137] }),
+    probe,
+  );
+  needs(2, ["godot"]);
+  setStatus({ ...run(2), status: "queued" } as Run, { status: "running" });
+  await plain.adb.reconcile("first", () => at);
+  expect(adb.mock.calls.some(([c]) => c.action === "usb_off")).toBe(false);
+  const l = new MachineLeases(
+    store,
+    await config(deviceSlots, deviceResources),
+    probe,
+  );
+  await l.adb.reconcile("first", () => at);
+  reply = { ...restarted, found: 0, reconnected: 0 };
+  await l.adb.reconcile("first", () => later(1000));
+  const usbOff = () =>
+    adb.mock.calls.filter(([c]) => c.action === "usb_off").length;
+  expect(usbOff()).toBe(2);
+  // Answered (nothing held USB): next only after the sweep interval.
+  await l.adb.reconcile("first", () => later(2000));
+  expect(usbOff()).toBe(2);
+  expect(events("machine_adb_legacy_usb_released")).toEqual([]);
+});
+
+test("C-833: a launch records the machine's adb environment; sessions from before a switch are fresh-session candidates", async () => {
+  const { probe } = fakeProbe();
+  const before = new MachineLeases(store, await config(), probe);
+  const { owner } = needs(1, ["other"]);
+  const launched = { ...run(1), status: "running", started_at: at } as Run;
+  setStatus(launched, {});
+  const live = {
+    ...owner,
+    runtime_ref: {
+      machine_id: "local",
+      runtime_machine: "local",
+      terminal_ref: "t1",
+      agent_name: "coder",
+      launch_generation: { run_id: launched.id, generation: "g1" },
+    },
+  } as typeof owner;
+  // Launched with slots: the same environment keeps the session.
+  launchDevices(before, "first", "local", launched.id, at);
+  expect(before.sessions.stale("first", live)).toBe(false);
+  expect(before.freshSession("first", live)).toBe(false);
+  // The machine now also hands out USB devices: replace at the next wake.
+  const after = new MachineLeases(
+    store,
+    await config(deviceSlots, deviceResources),
+    probe,
+  );
+  expect(after.sessions.stale("first", live)).toBe(true);
+  expect(after.freshSession("first", live)).toBe(true);
+  // No session, an external one, or an unmanaged machine: nothing to replace.
+  expect(after.sessions.stale("first", owner)).toBe(false);
+  expect(after.sessions.stale("first", { ...live, external: true })).toBe(
+    false,
+  );
+  const none = new MachineLeases(
+    store,
+    await config(undefined, { adb_slots: undefined }),
+    probe,
+  );
+  expect(none.sessions.stale("first", live)).toBe(false);
+  // The replacement's launch records the new environment.
+  launchDevices(after, "first", "local", launched.id, later(1000));
+  expect(after.sessions.stale("first", live)).toBe(false);
+  // A session without a launch generation cannot show its environment.
+  const { launch_generation: _, ...legacyRef } = live.runtime_ref ?? {};
+  expect(
+    after.sessions.stale("first", {
+      ...live,
+      runtime_ref: legacyRef,
+    } as typeof owner),
+  ).toBe(true);
+});
+
+test("C-833: old sessions are judged by their launch environment, not the time: launched before slots, or after without machine leases (before C-834)", async () => {
+  const { probe } = fakeProbe();
+  const session = (n: number) => {
+    const { owner } = needs(n, ["other"]);
+    const r = { ...run(n), status: "completed", started_at: at } as Run;
+    setStatus(r, {});
+    const live = {
+      ...owner,
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "local",
+        terminal_ref: `t${n}`,
+        agent_name: "coder",
+        launch_generation: { run_id: r.id, generation: `g${n}` },
+      },
+    } as typeof owner;
+    store.uow.run((tx) => tx.assignments.put("first", live));
+    return { live, run: r };
+  };
+  // Launched while the machine had no adb slots.
+  const unmanaged = new MachineLeases(
+    store,
+    await config(undefined, { adb_slots: undefined }),
+    probe,
+  );
+  const before = session(1);
+  launchDevices(unmanaged, "first", "local", before.run.id, at);
+  expect(unmanaged.sessions.stale("first", before.live)).toBe(false);
+  const l = new MachineLeases(store, await config(), probe);
+  // Launched after slots were enabled, but by a path that passed no machine
+  // leases: its environment never got the slot setup.
+  const leaseless = session(2);
+  launchDevices(undefined, "first", "local", leaseless.run.id, later(1000));
+  // Launched after, with the slot setup compiled in.
+  const current = session(3);
+  launchDevices(l, "first", "local", current.run.id, later(2000));
+  expect(l.sessions.stale("first", before.live)).toBe(true);
+  expect(l.sessions.stale("first", leaseless.live)).toBe(true);
+  expect(l.sessions.stale("first", current.live)).toBe(false);
+  expect(l.freshSession("first", leaseless.live)).toBe(true);
+  expect(l.sessions.staleSessions("local")).toEqual([
+    { project: "first", assignment_id: before.live.id },
+    { project: "first", assignment_id: leaseless.live.id },
+  ]);
+});
+
+// A stand-in adb server speaking the host protocol: it lists a USB device
+// only when started without ADB_USB=0, takes emulators registered with
+// `host:emulator:<adb port>` and network devices with `host:connect:`.
+const ADB_SERVER_STANDIN = `import json,os,socket,sys
+port,usb,devices,log=int(sys.argv[1]),sys.argv[2]=='1',json.loads(sys.argv[3]),sys.argv[4]
+ls=socket.socket(); ls.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); ls.bind(('127.0.0.1',port)); ls.listen(8)
+with open(log,'a') as f: f.write(json.dumps(dict(pid=os.getpid(),usb=usb))+'\\n')
+print('ready',ls.getsockname()[1],flush=True)
+def reply(c,t):
+ b=t.encode(); c.sendall(b'OKAY'+b'%04x'%len(b)+b)
+while True:
+ c,_=ls.accept(); c.settimeout(2)
+ try:
+  n=int(c.recv(4),16); svc=b''
+  while len(svc)<n: svc+=c.recv(n-len(svc))
+  svc=svc.decode()
+  if svc=='host:kill':
+   c.sendall(b'OKAY'); c.close(); ls.close(); sys.exit(0)
+  if svc=='host:devices': reply(c,''.join('%s\\tdevice\\n'%d for d in (['USB123'] if usb else [])+devices))
+  elif svc.startswith('host:emulator:'): devices.append('emulator-%d'%(int(svc[14:])-1))
+  elif svc.startswith('host:connect:'):
+   devices.append(svc[13:]); reply(c,'connected')
+ except (OSError,ValueError):
+  pass
+ c.close()
+`;
+// `adb -P <port> start-server`: start the stand-in as a daemon, honouring ADB_USB.
+const FAKE_ADB = `#!/usr/bin/python3
+import os,subprocess,sys
+a=sys.argv[1:]
+if a[:1]!=['-P'] or a[2:]!=['start-server']: sys.exit(1)
+d=os.path.dirname(os.path.abspath(__file__))
+p=subprocess.Popen(['/usr/bin/python3','-I',os.path.join(d,'standin.py'),a[1],'0' if os.environ.get('ADB_USB')=='0' else '1','[]',os.path.join(d,'log')],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,start_new_session=True)
+p.stdout.readline()
+`;
+
+test("C-833: the real script restarts this account's USB-holding legacy server with ADB_USB=0 and re-registers its emulator and network device", async () => {
+  const bin = await mkdtemp(join(tmpdir(), "cg-adb-usb-"));
+  const pids = () =>
+    readFile(join(bin, "log"), "utf8")
+      .then((t) =>
+        t
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l) as { pid: number; usb: boolean }),
+      )
+      .catch(() => []);
+  try {
+    await writeFile(join(bin, "standin.py"), ADB_SERVER_STANDIN);
+    await writeFile(join(bin, "adb"), FAKE_ADB, { mode: 0o755 });
+    const legacy = spawn(
+      "/usr/bin/python3",
+      [
+        "-I",
+        join(bin, "standin.py"),
+        "0",
+        "1",
+        JSON.stringify(["emulator-5590", "10.0.0.5:5555"]),
+        join(bin, "log"),
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    children.push(legacy);
+    const port = await new Promise<number>((resolve, reject) => {
+      legacy.stdout?.once("data", (d: Buffer) =>
+        resolve(Number(String(d).split(" ")[1])),
+      );
+      legacy.once("exit", () => reject(new Error("stand-in exited")));
+    });
+    const plain = await standIn("adb"); // holds no USB device: left alone
+    const probe = adbTargetProbe(
+      async () => ({
+        config: { mode: "local", dataDir: dir },
+        target: "local",
+      }),
+      (_config, args) =>
+        new Promise((resolve, reject) =>
+          execFile(
+            "/usr/bin/python3",
+            [...args],
+            { env: { PATH: `${bin}:/usr/bin:/bin` }, timeout: 15_000 },
+            (error, stdout) => (error ? reject(error) : resolve(stdout)),
+          ),
+        ),
+    );
+    const result = await probe({
+      action: "usb_off",
+      project: "first",
+      machine: "local",
+      generation: "generation-usb",
+      adb_ports: [plain, port],
+      emulator_ports: [],
+    });
+    expect(result).toEqual({
+      target: "local",
+      found: 1,
+      left: 0,
+      foreign: 0,
+      reconnected: 2,
+      missing: 0,
+    });
+    const started = await pids();
+    expect(started.map((s) => s.usb)).toEqual([true, false]);
+    expect(await listening(plain)).toBe(true);
+    // The restarted server on the same port lists the emulator under its old
+    // serial and the network device, but no USB device.
+    const listing = await new Promise<string>((resolve, reject) => {
+      const s = new Socket();
+      let data = "";
+      s.on("data", (d) => {
+        data += String(d);
+      });
+      s.once("close", () => resolve(data));
+      s.once("error", reject);
+      s.connect(port, "127.0.0.1", () => s.write("000chost:devices"));
+    });
+    expect(listing).toContain("emulator-5590\tdevice");
+    expect(listing).toContain("10.0.0.5:5555\tdevice");
+    expect(listing).not.toContain("USB123");
+    // Run again: nothing holds USB any more, nothing is restarted.
+    expect(
+      await probe({
+        action: "usb_off",
+        project: "first",
+        machine: "local",
+        generation: "generation-usb-2",
+        adb_ports: [port],
+        emulator_ports: [],
+      }),
+    ).toMatchObject({ found: 0, left: 0 });
+    expect(await pids()).toHaveLength(2);
+  } finally {
+    for (const s of (await pids()).slice(1)) {
+      try {
+        process.kill(s.pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await rm(bin, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("C-833: holder candidates name each live slot's session, the legacy ports' sessions from before the switch, and the default port", async () => {
+  const { probe } = fakeProbe();
+  const cfg = await config(deviceSlots, deviceResources);
+  const l = new MachineLeases(store, cfg, probe);
+  const held = await claim(l, 1, ["godot"]);
+  const { owner } = needs(2, ["other"]);
+  store.uow.run((tx) =>
+    tx.assignments.put("first", {
+      ...owner,
+      runtime_ref: {
+        machine_id: "local",
+        runtime_machine: "local",
+        terminal_ref: "t2",
+        agent_name: "coder",
+      },
+    }),
+  );
+  const label = (id: string) => sessionLabel(store, "first", id);
+  expect(
+    adbServerHolders(store, cfg, "local", (m) => l.devices.adbTypes(m)),
+  ).toEqual([
+    { port: 15100, kind: "slot", sessions: [label(held.owner.id)] },
+    { port: 5137, kind: "legacy", sessions: [label(owner.id)] },
+    { port: 5037, kind: "other", sessions: [] },
+  ]);
+  expect(label(owner.id)).toMatch(/^[\p{L}\p{N}._:/-]+$/u);
+  const none = await config(undefined, { adb_slots: undefined });
+  expect(adbServerHolders(store, none, "local", () => [])).toEqual([
+    { port: 5037, kind: "other", sessions: [] },
+  ]);
+});

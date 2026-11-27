@@ -19,4 +19,13 @@ export interface HostDeviceProvider
    * the holder's slot has been closed.
    */
   readonly needs_adb_slot?: true;
+  /**
+   * C-833: which of these local adb server ports holds the device (an
+   * initialization that does not see it then names the holder).
+   */
+  holder?(
+    target: HostDeviceTarget,
+    device: { readonly type: string; readonly id: string },
+    ports: readonly number[],
+  ): Promise<number | undefined>;
 }
