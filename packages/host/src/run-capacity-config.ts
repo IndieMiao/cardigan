@@ -6,6 +6,8 @@ import {
   DEFAULT_INACTIVE_CANCEL_AFTER_MS,
   DEFAULT_INBOX_STALL_AFTER_MS,
   DEFAULT_MAX_RUN_LIMIT,
+  DEFAULT_QUEUED_MIGRATE_AFTER_MS,
+  DEFAULT_QUEUED_MIGRATION_COOLDOWN_MS,
   DEFAULT_QUEUED_RECHECK_AFTER_MS,
   DEFAULT_RUN_LIMIT,
   parseCapabilityRequirement,
@@ -33,6 +35,10 @@ export interface RunCapacityConfiguration {
   maxForMachine(machine: string): number;
   displayNameForMachine(machine: string): string | undefined;
   readonly queuedRecheckAfterMs: number;
+  /** C-826: wait before a never-started queued Run may move to another machine. */
+  readonly queuedMigrateAfterMs: number;
+  /** C-826: no second migration of the same work item within this interval. */
+  readonly queuedMigrationCooldownMs: number;
   readonly inboxStallAfterMs: number;
   readonly inactiveCancelAfterMs: number | null;
   /** C-752: shorter grace for Runs holding scarce resources; null (off) unless configured. */
@@ -78,6 +84,8 @@ export async function loadRunCapacityConfig(
   const errors: string[] = [];
   let inactiveCancelAfterMs = DEFAULT_INACTIVE_CANCEL_AFTER_MS;
   let queuedRecheckAfterMs = DEFAULT_QUEUED_RECHECK_AFTER_MS;
+  let queuedMigrateAfterMs = DEFAULT_QUEUED_MIGRATE_AFTER_MS;
+  let queuedMigrationCooldownMs = DEFAULT_QUEUED_MIGRATION_COOLDOWN_MS;
   let inboxStallAfterMs = DEFAULT_INBOX_STALL_AFTER_MS;
   let scarceAfterMs: number | undefined;
   let scarceResources: readonly string[] = DEFAULT_SCARCE_RESOURCES;
@@ -90,6 +98,12 @@ export async function loadRunCapacityConfig(
     queuedRecheckAfterMs: errors.length
       ? DEFAULT_QUEUED_RECHECK_AFTER_MS
       : queuedRecheckAfterMs,
+    queuedMigrateAfterMs: errors.length
+      ? DEFAULT_QUEUED_MIGRATE_AFTER_MS
+      : queuedMigrateAfterMs,
+    queuedMigrationCooldownMs: errors.length
+      ? DEFAULT_QUEUED_MIGRATION_COOLDOWN_MS
+      : queuedMigrationCooldownMs,
     inboxStallAfterMs: errors.length
       ? DEFAULT_INBOX_STALL_AFTER_MS
       : inboxStallAfterMs,
@@ -162,6 +176,8 @@ export async function loadRunCapacityConfig(
             "inactive_cancel_after_minutes",
             "inbox_stall_after_minutes",
             "queued_recheck_after_minutes",
+            "queued_migrate_after_minutes",
+            "queued_migration_cooldown_minutes",
             "scarce_inactive_cancel_after_minutes",
             "scarce_resources",
           ].includes(key),
@@ -173,6 +189,8 @@ export async function loadRunCapacityConfig(
       "inactive_cancel_after_minutes",
       "inbox_stall_after_minutes",
       "queued_recheck_after_minutes",
+      "queued_migrate_after_minutes",
+      "queued_migration_cooldown_minutes",
       "scarce_inactive_cancel_after_minutes",
     ]) {
       const minutes = raw[key];
@@ -188,6 +206,10 @@ export async function loadRunCapacityConfig(
         inboxStallAfterMs = minutes * 60_000;
       else if (key === "queued_recheck_after_minutes")
         queuedRecheckAfterMs = minutes * 60_000;
+      else if (key === "queued_migrate_after_minutes")
+        queuedMigrateAfterMs = minutes * 60_000;
+      else if (key === "queued_migration_cooldown_minutes")
+        queuedMigrationCooldownMs = minutes * 60_000;
       else if (key === "scarce_inactive_cancel_after_minutes")
         scarceAfterMs = minutes * 60_000;
       else inactiveCancelAfterMs = minutes * 60_000;
@@ -313,7 +335,7 @@ export async function loadRunCapacityConfig(
   } catch {
     // Never include YAML contents (which could contain credentials) in diagnostics.
     errors.push(
-      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes、scarce_inactive_cancel_after_minutes 须为允许范围的正整数（最后一项须短于 inactive_cancel_after_minutes），scarce_resources 须为非空能力名列表，display_name 须为有效文字，resources 须按能力名设置正整数上限，adb_slots 的资源须已在 resources 中、端口范围有效且不与其它端口重叠。配置无效，暂停普通 Run 自动派发及失活回收",
+      "run-capacity.yaml 必须包含 machines 映射；limit 不得超过 max_limit（默认 16），两者及可选 inactive_cancel_after_minutes、inbox_stall_after_minutes、queued_recheck_after_minutes、queued_migrate_after_minutes、queued_migration_cooldown_minutes、scarce_inactive_cancel_after_minutes 须为允许范围的正整数（最后一项须短于 inactive_cancel_after_minutes），scarce_resources 须为非空能力名列表，display_name 须为有效文字，resources 须按能力名设置正整数上限，adb_slots 的资源须已在 resources 中、端口范围有效且不与其它端口重叠。配置无效，暂停普通 Run 自动派发及失活回收",
     );
   }
   return result();

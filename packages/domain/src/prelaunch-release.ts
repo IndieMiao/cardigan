@@ -13,13 +13,23 @@ export function prelaunchRelease(
     return (
       e.card_id === card &&
       e.actor.project_id === state.project_id &&
-      e.actor.kind !== "system" &&
+      // C-826: the system releases only to migrate a never-started queue.
+      (e.actor.kind !== "system" || isQueueMigrationPayload(p)) &&
       p?.assignment_id === assignment &&
       p.runtime_ref === null &&
       p.worktree_path === null &&
       p.branch === null
     );
   });
+}
+
+function isQueueMigrationPayload(p: Record<string, unknown> | null) {
+  const migration = p?.queue_migration;
+  return (
+    typeof migration === "object" &&
+    migration !== null &&
+    typeof p?.cancelled_queued_run_id === "string"
+  );
 }
 
 export function cancelledQueueRelease(

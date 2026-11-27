@@ -92,6 +92,8 @@ export interface ControlPlaneOptions {
   readonly dispatchTimeoutMs?: number;
   readonly deliveryRetryBaseMs?: number;
   readonly queuedRecheckAfterMs?: number;
+  readonly queuedMigrateAfterMs?: DispatcherOptions["queuedMigrateAfterMs"];
+  readonly queuedMigrationCooldownMs?: number;
   readonly inboxStallAfterMs?: number;
   readonly inactiveCancelAfterMs?: number | null;
   readonly scarceInactiveCancel?: DispatcherOptions["scarceInactiveCancel"];
@@ -220,6 +222,12 @@ export function startControlPlane(options: ControlPlaneOptions): ControlPlane {
       : {}),
     ...(options.queuedRecheckAfterMs !== undefined
       ? { queuedRecheckAfterMs: options.queuedRecheckAfterMs }
+      : {}),
+    ...(options.queuedMigrateAfterMs !== undefined
+      ? { queuedMigrateAfterMs: options.queuedMigrateAfterMs }
+      : {}),
+    ...(options.queuedMigrationCooldownMs !== undefined
+      ? { queuedMigrationCooldownMs: options.queuedMigrationCooldownMs }
       : {}),
     ...(options.inboxStallAfterMs !== undefined
       ? { inboxStallAfterMs: options.inboxStallAfterMs }

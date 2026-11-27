@@ -58,6 +58,8 @@ export function selectMachine(
     explicit?: string | undefined;
     profile?: string | undefined;
     failedMachine?: string | undefined;
+    /** C-826: machines ruled out for this selection only, with the reason recorded. */
+    exclude?: ReadonlyMap<string, string>;
   },
 ) {
   const { explicit } = options;
@@ -135,6 +137,8 @@ export function selectMachine(
       reasons = registryReasons(machine);
     if (machine_id === options.failedMachine)
       reasons.push("上次首发未完成，重新指派需要另一台机器");
+    const ruledOut = options.exclude?.get(machine_id);
+    if (ruledOut) reasons.push(ruledOut);
     if (machine_id !== "local") {
       if (f?.preparation_cooldown_until && f.preparation_cooldown_until > d.now)
         reasons.push(
