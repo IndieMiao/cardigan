@@ -3,18 +3,11 @@ import type { Assignment, Run } from "@cardigan/domain";
 import { runOccupiesSlot } from "@cardigan/domain";
 import {
   type ReadRepositories,
-  readMachineObservationsInTransaction,
   type Store,
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import type { AdbProbe } from "./adb-slot-probe.js";
-import {
-  ANDROID_DEVICE_RESOURCE,
-  androidDeviceMatches,
-  isAndroidDeviceKey,
-  usableAndroidDevice,
-} from "./android-devices.js";
 import type { MachinePolicy } from "./resource-policy.js";
 
 /**
@@ -47,13 +40,6 @@ export interface AdbSlotAccess {
   readonly slot: number;
   readonly adb_port: number;
   readonly emulator_port?: number;
-  /** C-813: serial of the USB device this Run holds exclusively. */
-  readonly device?: string;
-  /**
-   * C-813: the machine hands out USB devices but this Run holds none, so its
-   * adb server must not claim any (`ADB_USB=0`).
-   */
-  readonly usb_off?: true;
 }
 /** The launch environment's slot: a slot, none on a managed machine (null), or unmanaged (undefined). */
 export type LaunchAdbSlot = AdbSlotAccess | null | undefined;
@@ -164,7 +150,6 @@ interface Row {
   run_id: Run["id"] | null;
   purpose: "run" | "sweep";
   emulator: number;
-  device: string | null;
   target: string | null;
   acquired_at: string;
   release_state: string | null;
@@ -176,7 +161,6 @@ export interface AdbSlotDiagnostic {
   readonly slot: number;
   readonly adb_port: number;
   readonly emulator_port?: number;
-  readonly device?: string;
   readonly state: "free" | "run" | "sweep" | "release_pending";
   readonly project?: string;
   readonly assignment_id?: string;
@@ -255,41 +239,7 @@ export class AdbSlots {
       ...(row.emulator && row.emulator_port
         ? { emulator_port: row.emulator_port }
         : {}),
-      ...(row.device
-        ? { device: row.device }
-        : this.config
-              .adbSlots(row.machine)
-              ?.resources.has(ANDROID_DEVICE_RESOURCE)
-          ? { usb_off: true as const }
-          : {}),
     };
-  }
-  /**
-   * C-813: authorized devices of the project's current machine check that no
-   * live slot holds and that satisfy every narrowing key, by serial.
-   */
-  private freeDevices(
-    project: string,
-    machine: string,
-    keys: readonly string[],
-    now: string,
-  ): string[] {
-    const health = readMachineObservationsInTransaction(
-      this.store,
-      project,
-      machine,
-      now,
-    ).health;
-    if (!health?.available) return [];
-    const held = heldAndroidDevices(this.store, machine);
-    return (health.android_devices ?? [])
-      .filter(
-        (d) =>
-          usableAndroidDevice(d) &&
-          !held.has(d.serial) &&
-          androidDeviceMatches(d, keys),
-      )
-      .map((d) => d.serial);
   }
   /** What the launch environment of this Run must carry. */
   launchSlot(project: string, machine: string, run: string): LaunchAdbSlot {
@@ -297,27 +247,18 @@ export class AdbSlots {
     const row = this.held(project, run);
     return row && row.machine === machine ? this.access(row) : null;
   }
-  /** A reason this Run cannot get a slot (and device) now, if any. */
+  /** A reason this Run cannot get a slot now, if any. */
   blocked(
-    project: string,
     machine: string,
     keys: readonly string[],
-    now: string,
-    own?: { run: string },
+    own?: { project: string; run: string },
   ) {
-    const device = keys.some(isAndroidDeviceKey);
     const p = this.applies(machine, keys);
-    // C-813: only a slot's own adb server may hold a device, and closing it
-    // is what frees the device again.
-    if (device && !p?.resources.has(ANDROID_DEVICE_RESOURCE))
-      return "真机：本机 adb_slots 未包含 android.device";
     if (!p) return;
     if (!this.probe) return "adb：缺少释放执行器";
-    if (own && this.held(project, own.run)) return;
+    if (own && this.held(own.project, own.run)) return;
     if (!this.freeSlots(machine, p).length)
       return "adb：端口槽位已满，等待释放";
-    if (device && !this.freeDevices(project, machine, keys, now).length)
-      return "真机：没有空闲的已授权真机，等待释放或重新检查机器";
   }
   /** Inside the claim transaction; reuses a slot the Run already holds. */
   acquire(
@@ -336,19 +277,12 @@ export class AdbSlots {
     if (!target || !this.probe) throw new Error("adb 槽位缺少执行目标");
     const slot = this.freeSlots(a.machine_id, p)[0];
     if (slot === undefined) throw new Error("adb 槽位已满");
-    let device: string | undefined;
-    if (keys.some(isAndroidDeviceKey)) {
-      if (!p.resources.has(ANDROID_DEVICE_RESOURCE))
-        throw new Error("真机需要 adb 槽位");
-      device = this.freeDevices(project, a.machine_id, keys, now)[0];
-      if (device === undefined) throw new Error("没有空闲真机");
-    }
     const generation = randomUUID(),
       ports = this.ports(p, slot),
       emulator = keys.includes(EMULATOR_RESOURCE) ? 1 : 0;
     this.store.database
       .prepare(
-        "INSERT INTO machine_adb_slots (generation,machine,slot,adb_port,emulator_port,project,assignment_id,run_id,purpose,emulator,device,target,acquired_at) VALUES (?,?,?,?,?,?,?,?,'run',?,?,?,?)",
+        "INSERT INTO machine_adb_slots (generation,machine,slot,adb_port,emulator_port,project,assignment_id,run_id,purpose,emulator,target,acquired_at) VALUES (?,?,?,?,?,?,?,?,'run',?,?,?)",
       )
       .run(
         generation,
@@ -360,7 +294,6 @@ export class AdbSlots {
         a.id,
         run.id,
         emulator,
-        device ?? null,
         target,
         now,
       );
@@ -371,7 +304,6 @@ export class AdbSlots {
       assignment_id: a.id,
       run_id: run.id,
       emulator: emulator === 1,
-      ...(device ? { device } : {}),
     });
     return {
       generation,
@@ -380,11 +312,6 @@ export class AdbSlots {
       ...(emulator && ports.emulator_port
         ? { emulator_port: ports.emulator_port }
         : {}),
-      ...(device
-        ? { device }
-        : p.resources.has(ANDROID_DEVICE_RESOURCE)
-          ? { usb_off: true as const }
-          : {}),
     };
   }
   private event(
@@ -485,7 +412,6 @@ export class AdbSlots {
             ...base,
             run_id: row.run_id ?? "",
             closed: result.found,
-            ...(row.device ? { device: row.device } : {}),
           });
         else
           this.event(tx, row.project, "machine_adb_orphan_closed", at, {
@@ -699,7 +625,6 @@ export class AdbSlots {
               ...(row.emulator_port
                 ? { emulator_port: row.emulator_port }
                 : {}),
-              ...(row.device ? { device: row.device } : {}),
               state: row.release_state
                 ? "release_pending"
                 : row.purpose === "sweep"
@@ -732,19 +657,6 @@ export class AdbSlots {
       });
     return result;
   }
-}
-
-/** C-813: USB devices some live adb slot on this machine holds (any project). */
-export function heldAndroidDevices(store: Store, machine: string) {
-  return new Set(
-    (
-      store.database
-        .prepare(
-          "SELECT device FROM machine_adb_slots WHERE machine=? AND released_at IS NULL AND device IS NOT NULL",
-        )
-        .all(machine) as { device: string }[]
-    ).map((r) => r.device),
-  );
 }
 
 /**

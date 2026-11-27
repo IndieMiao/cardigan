@@ -133,6 +133,7 @@ export * from "./decision-other.js";
 export * from "./decision-question.js";
 export * from "./deployment-port.js";
 export * from "./derived.js";
+export * from "./device-provider.js";
 export * from "./dispatch-records.js";
 export * from "./dispatch-tier.js";
 export * from "./employee.js";

@@ -151,11 +151,18 @@ export interface CompileAssignmentInput {
     readonly slot: number;
     readonly adb_port: number;
     readonly emulator_port?: number;
-    /** C-813: serial of the USB device this Run holds exclusively. */
-    readonly device?: string;
-    /** C-813: the machine hands out USB devices; this Run holds none. */
+    /** C-813: the machine hands out USB devices; this Run holds none (`ADB_USB=0`). */
     readonly usb_off?: true;
   } | null;
+  /**
+   * C-813: devices this Run holds exclusively: the providers' session
+   * environment (only `ANDROID_SERIAL` / `CARDIGAN_*`, applied last) and one
+   * prompt rule per device.
+   */
+  readonly device_session?: {
+    readonly env: Readonly<Record<string, string>>;
+    readonly rules: readonly string[];
+  };
   /**
    * C-726: usage notes of the capabilities this work item requires
    * (`requirements.capabilities`), merged for the Run's machine. Condensed

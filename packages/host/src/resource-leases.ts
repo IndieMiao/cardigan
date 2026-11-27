@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { Actor, Assignment, JsonValue, Run } from "@cardigan/domain";
+import type {
+  Actor,
+  Assignment,
+  DeviceObservation,
+  JsonValue,
+  Run,
+} from "@cardigan/domain";
 import { awaitsStartPublication, runOccupiesSlot } from "@cardigan/domain";
 import {
   type ReadRepositories,
@@ -8,6 +14,7 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { type AdbSlotAccess, AdbSlots } from "./adb-slots.js";
+import { DeviceLeases } from "./device-leases.js";
 import {
   CAPACITY_WAIT_REASON,
   type ResourceWaitKind,
@@ -54,6 +61,8 @@ export type ResourceAccess = {
   }[];
   /** C-679: this Run's own adb server and emulator ports. */
   adb?: AdbSlotAccess;
+  /** C-813: the devices this Run holds exclusively. */
+  devices?: DeviceObservation[];
 };
 function event(
   tx: StoreTransactionContext,
@@ -97,6 +106,7 @@ const canonicalTime = (s: string) => {
 export class MachineLeases {
   private clearances: BindingClearances;
   readonly adb: AdbSlots;
+  readonly devices: DeviceLeases;
   constructor(
     readonly store: Store,
     readonly config: RunCapacityConfiguration,
@@ -105,6 +115,19 @@ export class MachineLeases {
   ) {
     this.clearances = new BindingClearances(store, probe);
     this.adb = new AdbSlots(store, config, probe.adb);
+    this.devices = new DeviceLeases(
+      store,
+      config,
+      (project, machine, resource, now) =>
+        this.active(machine, now).some(
+          (l) =>
+            l.resource === resource &&
+            l.project !== project &&
+            !!l.ends_at &&
+            l.ends_at > now &&
+            !l.deadline_recorded,
+        ),
+    );
   }
   private rows(sql: string, ...args: string[]): Lease[] {
     return this.store.database
@@ -134,6 +157,10 @@ export class MachineLeases {
       this.managed(a.machine_id) ||
       // A new Run must not inherit the previous Run's released adb ports.
       this.adbNeeded(project, a) ||
+      // C-813: nor a device the previous Run held.
+      this.devices.required(
+        this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a)),
+      ).length > 0 ||
       !!this.store.database
         .prepare(
           "SELECT 1 FROM machine_resource_leases WHERE project=? AND assignment_id=? LIMIT 1",
@@ -406,7 +433,11 @@ export class MachineLeases {
         } else if (l.binding && !l.verified_at) return `${key}：等待释放核验`;
       }
     }
-    if (!own?.adb) return this.adb.blocked(project, machine, keys, now);
+    if (!own?.devices) {
+      const device = this.devices.blocked(project, machine, keys, now);
+      if (device) return device;
+    }
+    if (!own?.adb) return this.adb.blocked(machine, keys);
   }
   private policySignature(
     machine: string,
@@ -507,7 +538,8 @@ export class MachineLeases {
         (key) =>
           policies?.get(key)?.checks.size || policies?.get(key)?.bindings.size,
       ) ||
-      this.adb.applies(a.machine_id, keys)
+      this.adb.applies(a.machine_id, keys) ||
+      this.devices.required(keys).length
     )
       return {
         keys,
@@ -615,6 +647,16 @@ export class MachineLeases {
         return "资源持有者已变化";
       own.adb = slot;
     }
+    if (this.devices.required(keys).length) {
+      if (!this.devices.holds(project, run.id, keys))
+        return "设备：尚未取得本 Run 的设备";
+      own.devices = this.devices.launchDevices(
+        project,
+        a.machine_id,
+        run.id,
+        now,
+      );
+    }
     return this.blocked(project, a.machine_id, keys, now, undefined, own);
   }
   // Called after all other admission gates, inside the BellAttempt transaction.
@@ -647,11 +689,13 @@ export class MachineLeases {
           this.policySignature(machine, project, keys),
         );
     const adb = this.adb.acquire(tx, project, a, run, keys, i.target, now);
-    if (!this.managed(machine) && !i.target) return;
+    const devices = this.devices.acquire(tx, project, a, run, keys, now);
+    if (!this.managed(machine) && !i.target && !devices.length) return;
     const access: ResourceAccess = {
       ...(i.target ? { target: i.target } : {}),
       bindings: [],
       ...(adb ? { adb } : {}),
+      ...(devices.length ? { devices } : {}),
     };
     for (const key of keys) {
       const b = this.policy(machine, project, key);
@@ -768,6 +812,7 @@ export class MachineLeases {
   }
   async reconcile(project: string, clock: () => string) {
     this.adb.kick(project, clock);
+    this.devices.reconcile(project, clock);
     if (
       !this.store.database
         .prepare(

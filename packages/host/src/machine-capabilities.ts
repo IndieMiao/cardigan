@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import type { ActionCommand, Machine } from "@cardigan/domain";
+import {
+  type ActionCommand,
+  type DeviceObservation,
+  deviceCapabilities,
+  type Machine,
+  mergeHeldDevices,
+  normalizeDeviceInventory,
+} from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import {
   acceptedBrowserDigest,
@@ -14,19 +21,16 @@ import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
-import { heldAndroidDevices } from "./adb-slots.js";
 import { agentToolsCapability } from "./agent-tools.js";
 import {
   type AgentToolsOutcome,
   reconcileAgentToolsAction,
 } from "./agent-tools-maintenance.js";
+import { heldDevices } from "./device-leases.js";
 import {
-  ANDROID_DEVICE_PROBE_COMMAND,
-  androidDeviceCapabilityKeys,
-  mergeHeldAndroidDevices,
-  parseAndroidDevices,
-  usableAndroidDevice,
-} from "./android-devices.js";
+  DEVICE_PROVIDERS,
+  type HostDeviceProvider,
+} from "./device-providers.js";
 import {
   type CapabilityDefinition,
   loadMachineCapabilityCatalog,
@@ -82,8 +86,8 @@ export interface MachineObservationOptions {
     | Promise<string | undefined>;
   readonly catalog?: () => readonly CapabilityDefinition[];
   readonly probe?: CapabilityProbe;
-  /** C-813: list USB Android devices when adb is present; on by default only with the production catalog. */
-  readonly androidDevices?: boolean;
+  /** C-813: device providers to list; all of them by default only with the production catalog. */
+  readonly deviceProviders?: readonly HostDeviceProvider[];
   /** C-608 readiness patrol; on by default only with the production catalog. */
   readonly readiness?: (input: ReadinessInput) => Promise<ReadinessOutcome>;
   readonly env?: NodeJS.ProcessEnv;
@@ -221,52 +225,55 @@ export async function refreshMachineObservations(
         evidence_ref: `machine-observation:${observation}#${entry.key}`,
       });
     }
-    if (failures.length) health = { ...health, capability_failures: failures };
-    if (
-      (options.androidDevices ?? options.catalog === undefined) &&
-      capabilities.some((c) => c.key === "android.sdk")
-    ) {
-      // C-813: a failed or unreadable listing keeps only devices a Run holds
-      // and is reported, instead of failing the whole machine check.
-      const listed = await probe(
-        target.execution,
-        target.machine.os,
-        ANDROID_DEVICE_PROBE_COMMAND,
-        options.signal,
+    // C-813: each device provider whose prerequisite capability was just
+    // verified lists its devices. A failed listing keeps only devices a Run
+    // holds and is reported, instead of failing the whole machine check.
+    const providers =
+      options.deviceProviders ??
+      (options.catalog === undefined ? DEVICE_PROVIDERS : []);
+    let devices: DeviceObservation[] | undefined;
+    for (const provider of providers) {
+      options.signal?.throwIfAborted();
+      if (
+        !provider.os.includes(target.machine.os) ||
+        (provider.requires_capability &&
+          !capabilities.some((c) => c.key === provider.requires_capability))
+      )
+        continue;
+      let raw: readonly unknown[] | undefined;
+      try {
+        raw = await provider.list({
+          execution: target.execution,
+          os: target.machine.os,
+          probe,
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+      } catch {
+        raw = undefined;
+      }
+      const listed = mergeHeldDevices(
+        normalizeDeviceInventory(provider.type, raw ?? []),
+        previousHealth?.devices?.filter((d) => d.type === provider.type),
+        heldDevices(store, machine, provider.type),
       );
-      const parsed = listed.ok ? parseAndroidDevices(listed.output) : undefined;
-      const devices = mergeHeldAndroidDevices(
-        parsed ?? [],
-        previousHealth?.android_devices,
-        heldAndroidDevices(store, machine),
-      );
-      health = { ...health, android_devices: devices };
-      if (!parsed)
-        health = {
-          ...health,
-          capability_failures: [
-            ...(health.capability_failures ?? []),
-            {
-              key: "android.device",
-              search_locations: [],
-              reason: "无法列出 adb 真机",
-            },
-          ],
-        };
+      devices = [...(devices ?? []), ...listed];
+      if (!raw)
+        failures.push({
+          key: provider.type,
+          search_locations: [],
+          reason: `无法列出${provider.label}`,
+        });
       const verified_at = now();
-      const keys = new Set(
-        devices
-          .filter(usableAndroidDevice)
-          .flatMap(androidDeviceCapabilityKeys),
-      );
-      for (const key of [...keys].sort())
+      for (const key of deviceCapabilities(listed))
         capabilities.push({
           key,
           version: null,
           verified_at,
-          evidence_ref: `machine-observation:${observation}#android.device`,
+          evidence_ref: `machine-observation:${observation}#${provider.type}`,
         });
     }
+    if (devices) health = { ...health, devices };
+    if (failures.length) health = { ...health, capability_failures: failures };
     const observe =
       options.readiness ?? (options.catalog === undefined && observeReadiness);
     if (

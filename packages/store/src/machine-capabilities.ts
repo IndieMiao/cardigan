@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Actor } from "@cardigan/domain";
+import type { Actor, DeviceObservation } from "@cardigan/domain";
 import type { Store } from "./store.js";
 
 export const MACHINE_OBSERVATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -61,21 +61,8 @@ export interface MachineHealth {
   /** Non-blocking problems: the machine stays available for dispatch. */
   readonly warnings?: readonly string[];
   readonly readiness?: MachineReadiness;
-  /** C-813: USB Android devices the project account's adb sees; strict patterns only. */
-  readonly android_devices?: readonly AndroidDeviceObservation[];
-}
-/** C-813: `in_use` is a device a Run's own adb server holds right now. */
-export interface AndroidDeviceObservation {
-  readonly serial: string;
-  readonly state:
-    | "authorized"
-    | "unauthorized"
-    | "offline"
-    | "no_permission"
-    | "in_use"
-    | "other";
-  readonly model?: string;
-  readonly android_version?: string;
+  /** C-813: external devices the providers listed; strictly validated fields only. */
+  readonly devices?: readonly DeviceObservation[];
 }
 export type MachineReadinessStatus =
   | "ok"
