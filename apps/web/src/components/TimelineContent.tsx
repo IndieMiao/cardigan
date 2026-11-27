@@ -6,10 +6,11 @@ import type { CardDetail, TimelineEntryView } from "../api.js";
 import { decisionOption, decisionTitle } from "../decision-labels.js";
 import { routeHash } from "../route.js";
 import { DecisionAffectedCards } from "./DecisionAffectedCards.js";
-import { DecisionAttachments } from "./DecisionAttachments.js";
+import { DecisionBrief, DecisionOptionList } from "./DecisionBrief.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { IdTag, LongContent, StatusTag } from "./Foundation.js";
 import { IdentityRow } from "./IdentityRow.js";
+import { DetailChoiceTag } from "./layout/CardDetailLayout.js";
 import { Markdown } from "./Operations.js";
 import { TimelineHeader } from "./TimelineHeader.js";
 import { TimelineVersion } from "./TimelineVersion.js";
@@ -200,97 +201,109 @@ export function TimelineContent({
         ? "provisional"
         : "resolved"
       : decision.status;
-    return (
-      <div className="structured-entry">
-        {heading(
-          "拍板",
-          decision.id,
-          resolved &&
-            decision.trigger === "merge_confirmation" &&
-            entry.decision_option ? (
-            <StatusTag
-              status={status}
-              label={
-                entry.decision_via === "delegated"
-                  ? entry.decision_delegate === "pm"
-                    ? `PM 代确认：${decisionOption(decision, entry.decision_option)}`
-                    : "自动合并（代批）"
-                  : decisionOption(decision, entry.decision_option)
+    const result =
+      resolved &&
+      decision.trigger === "merge_confirmation" &&
+      entry.decision_option ? (
+        <StatusTag
+          status={status}
+          label={
+            entry.decision_via === "delegated"
+              ? entry.decision_delegate === "pm"
+                ? `PM 代确认：${decisionOption(decision, entry.decision_option)}`
+                : "自动合并（代批）"
+              : decisionOption(decision, entry.decision_option)
+          }
+        />
+      ) : resolved &&
+        decision.trigger !== "merge_confirmation" &&
+        entry.decision_via === "delegated" ? (
+        <StatusTag status={status} label="已拍板（PM 代拍）" />
+      ) : (
+        <StatusTag status={status} />
+      );
+    const autoMerge = decision.auto_merge && (
+      <p className="hint">
+        将于{" "}
+        {new Date(decision.auto_merge.due_at).toLocaleTimeString("zh-CN", {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        })}{" "}
+        自动合并（偏好设置：{decision.auto_merge.minutes} 分钟）
+      </p>
+    );
+    const meta = (
+      <IdentityRow className="entry-meta">
+        <span>
+          {resolved ? (
+            "已记录拍板原话"
+          ) : decision.decider === "human" ? (
+            <>
+              由{" "}
+              <EmployeeIdentity
+                {...decision.decider_view}
+                author="human"
+                showTitle={false}
+              />{" "}
+              拍板
+            </>
+          ) : (
+            "由指定角色拍板"
+          )}
+        </span>
+        {!resolved && decision.blocking && <span>影响工作继续</span>}
+      </IdentityRow>
+    );
+    // C-810: a request reads like the decision card in Needs You and the
+    // card's “下一步”; the options are answered there, not here.
+    if (!resolved)
+      return (
+        <div className="structured-entry">
+          {heading("拍板", decision.id, result)}
+          <DecisionBrief
+            decision={decision}
+            projectId={projectId}
+            question
+            details={
+              <>
+                <DecisionAffectedCards
+                  decision={decision}
+                  projectId={projectId}
+                />
+                {autoMerge}
+              </>
+            }
+          >
+            <DecisionOptionList
+              q={decision}
+              tag={(key) =>
+                key === decision.recommended && (
+                  <DetailChoiceTag>推荐</DetailChoiceTag>
+                )
               }
             />
-          ) : resolved &&
-            decision.trigger !== "merge_confirmation" &&
-            entry.decision_via === "delegated" ? (
-            <StatusTag status={status} label="已拍板（PM 代拍）" />
-          ) : (
-            <StatusTag status={status} />
-          ),
-        )}
+          </DecisionBrief>
+          {meta}
+        </div>
+      );
+    return (
+      <div className="structured-entry">
+        {heading("拍板", decision.id, result)}
         <p className="entry-summary">{decisionTitle(decision)}</p>
         <DecisionAffectedCards decision={decision} projectId={projectId} />
-        {!resolved && (
-          <DecisionAttachments attachments={decision.attachments} />
-        )}
-        {!resolved && decision.auto_merge && (
-          <p className="hint">
-            将于{" "}
-            {new Date(decision.auto_merge.due_at).toLocaleTimeString("zh-CN", {
-              hour: "2-digit",
-              minute: "2-digit",
-              hour12: false,
-            })}{" "}
-            自动合并（偏好设置：{decision.auto_merge.minutes} 分钟）
+        {meta}
+        {decision.trigger !== "merge_confirmation" && (
+          <p>
+            记录的结果：
+            {entry.decision_option
+              ? decisionOption(decision, entry.decision_option)
+              : "原记录未附选项"}
           </p>
         )}
-        <IdentityRow className="entry-meta">
-          <span>
-            {resolved ? (
-              "已记录拍板原话"
-            ) : decision.decider === "human" ? (
-              <>
-                由{" "}
-                <EmployeeIdentity
-                  {...decision.decider_view}
-                  author="human"
-                  showTitle={false}
-                />{" "}
-                拍板
-              </>
-            ) : (
-              "由指定角色拍板"
-            )}
-          </span>
-          {!resolved && decision.blocking && <span>影响工作继续</span>}
-        </IdentityRow>
-        {entry.type === "decision_request" ? (
-          <details>
-            <summary>背景与选项</summary>
-            {decision.context && <Markdown body={decision.context} />}
-            {decision.options.map((o) => (
-              <div key={o.key}>
-                <strong>
-                  {o.key}：{decisionOption(decision, o.key)}
-                  {o.key === decision.recommended ? "（推荐）" : ""}
-                </strong>
-                <Markdown body={`影响：${o.impact}`} />
-              </div>
-            ))}
-          </details>
-        ) : (
-          <>
-            {decision.trigger !== "merge_confirmation" && (
-              <p>
-                记录的结果：
-                {entry.decision_option
-                  ? decisionOption(decision, entry.decision_option)
-                  : "原记录未附选项"}
-              </p>
-            )}
-            <blockquote>
-              <Markdown body={entry.body} />
-            </blockquote>
-          </>
-        )}
+        <blockquote>
+          <Markdown body={entry.body} />
+        </blockquote>
       </div>
     );
   }

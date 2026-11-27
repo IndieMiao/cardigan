@@ -139,7 +139,7 @@ test("C-202: a risk other than 无 is flagged; 无 is not", async () => {
   expect(calm.getByText("无")).toBeTruthy();
 });
 
-test("C-202: an older decision without a plain summary looks exactly as before", async () => {
+test("C-810: an older decision without a plain summary folds its context into 详细信息", async () => {
   renderNeeds([choose(), merge()]);
   const article = await screen.findByRole("article", { name: "拍板 Q-4" });
   expect(
@@ -147,8 +147,11 @@ test("C-202: an older decision without a plain summary looks exactly as before",
       name: `Q-4 ${PLAIN_SUMMARY_COPY.region}`,
     }),
   ).toBe(null);
-  expect(within(article).getByText("背景")).toBeTruthy();
-  expect(within(article).queryByText(PLAIN_SUMMARY_COPY.details)).toBe(null);
+  expect(within(article).queryByText("背景")).toBe(null);
+  expect(
+    within(article).getByText(PLAIN_SUMMARY_COPY.details).closest("details")
+      ?.open,
+  ).toBe(false);
   fireEvent.click(screen.getByRole("tab", { name: /^合并确认/ }));
   const confirmation = await screen.findByRole("article", {
     name: "合并确认 Q-3",
