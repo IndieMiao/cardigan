@@ -25,7 +25,7 @@
 | 规则 | 唯一入口与实测要求 | 标准图 |
 |---|---|---|
 | 页头 | `PageTitle` → `PageHeader`；左标题、可选计数，右侧 `PageSummary` / `CapacitySummary`；摘要无边框，不塞进工具栏 | 图 1、6 |
-| 工具栏左组 | `PageToolbar.fields`，顺序为状态、下一步、角色、排序、搜索、显示。由字段节点直接参与 flex，不能多包一层改变折行 | 图 1、3 |
+| 工具栏左组 | `PageToolbar.fields`，顺序为类型、状态（仅列表视图）、排序、搜索、显示（C-816）。由字段节点直接参与 flex，不能多包一层改变折行 | 图 1、3 |
 | 工具栏右组 | `PageToolbar` 的 children 顺序为 `RefreshGroup`、`CardsViewSwitch`。整组右对齐，组内不折行；宽窄屏保持相同顺序 | 图 1、3 |
 | 内容区 | 看板/列表共用 `ui-workspace`，页头和工具栏不能随视图切换跳动。宽屏内容内边距 24px，≤760px 为 12px；工具栏下间距 12px | 图 1、2、3 |
 | 搜索 | `SearchInput`，上限 240px、最小 min(140px,100%)，宽度不足时自然换行；不能用绝对定位挤进工具栏 | 图 1、3 |
