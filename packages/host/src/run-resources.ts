@@ -12,6 +12,7 @@ import {
   type WorkItemRequirements,
 } from "@cardigan/domain";
 import type { ReadRepositories } from "@cardigan/store";
+import { withAndroidDeviceResource } from "./android-devices.js";
 
 function resourceKeys(capabilities: readonly string[]): string[] {
   const keys = new Set<string>();
@@ -20,7 +21,8 @@ function resourceKeys(capabilities: readonly string[]): string[] {
     if (!parsed.ok) throw new Error("Invalid stored capability requirement");
     keys.add(parsed.value.key);
   }
-  return [...keys];
+  // C-813: a device narrowed by serial or model still takes a device slot.
+  return withAndroidDeviceResource([...keys]);
 }
 
 /** New admission: template defaults are already on the item; use the pinned role. */

@@ -59,6 +59,19 @@ const ADB_SLOT_RULE =
   "本次 Run 有自己的 adb 服务端口（ANDROID_ADB_SERVER_PORT）。adb 只用这个端口，不要用 -P 指定别的端口、默认 5037 或用户 USB 真机；Run 结束时系统会关闭它。";
 const ADB_EMULATOR_RULE =
   "启动模拟器必须加 -port $CARDIGAN_EMULATOR_PORT，序列号是 $ANDROID_SERIAL；Run 结束时系统会关闭这个模拟器。";
+// C-813: the slot's own adb server is the only one that may hold the device.
+const ADB_DEVICE_RULE =
+  "本次 Run 独占 USB 真机 $CARDIGAN_DEVICE_SERIAL（ANDROID_SERIAL 已指向它）。第一条 adb 命令前先执行 adb --one-device $CARDIGAN_DEVICE_SERIAL start-server，只占用这一台；不要操作其它真机。Run 结束时系统关闭 adb 服务并释放真机。";
+const ADB_BOTH_RULE =
+  "本次 Run 同时有模拟器和 USB 真机：ANDROID_SERIAL 和 $CARDIGAN_EMULATOR_SERIAL 指向模拟器，真机是 $CARDIGAN_DEVICE_SERIAL，操作真机必须写 adb -s $CARDIGAN_DEVICE_SERIAL。第一条 adb 命令前先执行 adb --one-device $CARDIGAN_DEVICE_SERIAL start-server，只占用这一台真机；不要操作其它真机。Run 结束时系统关闭模拟器和 adb 服务并释放真机。";
+const ADB_DEVICE_SLOT_RULE =
+  "本次 Run 有自己的 adb 服务端口（ANDROID_ADB_SERVER_PORT）。adb 只用这个端口，不要用 -P 指定别的端口或默认 5037；Run 结束时系统会关闭它。";
+function adbSlotRule(slot: NonNullable<CompileAssignmentInput["adb_slot"]>) {
+  if (slot.device && slot.emulator_port)
+    return `${ADB_DEVICE_SLOT_RULE}${ADB_EMULATOR_RULE}${ADB_BOTH_RULE}`;
+  if (slot.device) return `${ADB_DEVICE_SLOT_RULE}${ADB_DEVICE_RULE}`;
+  return `${ADB_SLOT_RULE}${slot.emulator_port ? ADB_EMULATOR_RULE : ""}`;
+}
 export function compileAssignmentLaunch(
   input: CompileAssignmentInput,
 ): CompiledAssignmentLaunch {
@@ -72,7 +85,7 @@ export function compileAssignmentLaunch(
     throw new Error("Invalid MCP session key");
   const identity = employeeIdentityPrompt(input.employee?.identity);
   const policyRule = input.adb_slot
-    ? `\n\n${ADB_SLOT_RULE}${input.adb_slot.emulator_port ? ADB_EMULATOR_RULE : ""}`
+    ? `\n\n${adbSlotRule(input.adb_slot)}`
     : input.resource_bindings
       ? "\n\n只能使用本次 CARDIGAN_RESOURCE_BINDINGS 中分配的端口和设备。禁止裸 adb、默认 5037、未分配端口及用户 USB 真机。没有分配则不得操作设备。"
       : "";
@@ -280,6 +293,17 @@ export function compileAssignmentLaunch(
         env.CARDIGAN_EMULATOR_PORT = String(input.adb_slot.emulator_port);
         env.ANDROID_SERIAL = `emulator-${input.adb_slot.emulator_port}`;
       } else env.ANDROID_SERIAL = "cardigan-unassigned";
+      // C-813: a held USB device. With an emulator as well, ANDROID_SERIAL
+      // stays on the emulator (existing emulator scripts keep working) and
+      // both serials are given separately.
+      if (input.adb_slot.device) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.adb_slot.device))
+          throw new Error("Invalid Android device serial");
+        env.CARDIGAN_DEVICE_SERIAL = input.adb_slot.device;
+        if (input.adb_slot.emulator_port)
+          env.CARDIGAN_EMULATOR_SERIAL = env.ANDROID_SERIAL;
+        else env.ANDROID_SERIAL = input.adb_slot.device;
+      } else if (input.adb_slot.usb_off) env.ADB_USB = "0";
     } else {
       env.ADB_SERVER_SOCKET = "localfilesystem:/dev/null";
       env.ANDROID_SERIAL = "cardigan-unassigned";
@@ -321,6 +345,12 @@ export function compileAssignmentLaunch(
     // C-679: a fixed port from the worker binding must not override (or
     // share) the Run's own; the host warns about it separately.
     if (input.adb_slot !== undefined && key === "ANDROID_ADB_SERVER_PORT")
+      continue;
+    // C-813: whether the Run's adb server may claim USB devices is the host's call.
+    if (
+      key === "ADB_USB" &&
+      (input.adb_slot?.device !== undefined || input.adb_slot?.usb_off)
+    )
       continue;
     if (
       Object.hasOwn(env, key) ||

@@ -14,11 +14,19 @@ import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
+import { heldAndroidDevices } from "./adb-slots.js";
 import { agentToolsCapability } from "./agent-tools.js";
 import {
   type AgentToolsOutcome,
   reconcileAgentToolsAction,
 } from "./agent-tools-maintenance.js";
+import {
+  ANDROID_DEVICE_PROBE_COMMAND,
+  androidDeviceCapabilityKeys,
+  mergeHeldAndroidDevices,
+  parseAndroidDevices,
+  usableAndroidDevice,
+} from "./android-devices.js";
 import {
   type CapabilityDefinition,
   loadMachineCapabilityCatalog,
@@ -74,6 +82,8 @@ export interface MachineObservationOptions {
     | Promise<string | undefined>;
   readonly catalog?: () => readonly CapabilityDefinition[];
   readonly probe?: CapabilityProbe;
+  /** C-813: list USB Android devices when adb is present; on by default only with the production catalog. */
+  readonly androidDevices?: boolean;
   /** C-608 readiness patrol; on by default only with the production catalog. */
   readonly readiness?: (input: ReadinessInput) => Promise<ReadinessOutcome>;
   readonly env?: NodeJS.ProcessEnv;
@@ -94,12 +104,13 @@ export async function refreshMachineObservations(
   const now = options.now ?? (() => new Date().toISOString());
   const actor = { kind: "system" as const, project_id: project };
   const observation = options.observationId ?? randomUUID();
-  const previousReadiness = readMachineObservations(
+  const previousHealth = readMachineObservations(
     store,
     project,
     machine,
     now(),
-  ).health?.readiness;
+  ).health;
+  const previousReadiness = previousHealth?.readiness;
   beginMachineObservation(store, actor, project, machine, observation, now());
   let health: MachineHealth = {
     status: "failed",
@@ -211,6 +222,51 @@ export async function refreshMachineObservations(
       });
     }
     if (failures.length) health = { ...health, capability_failures: failures };
+    if (
+      (options.androidDevices ?? options.catalog === undefined) &&
+      capabilities.some((c) => c.key === "android.sdk")
+    ) {
+      // C-813: a failed or unreadable listing keeps only devices a Run holds
+      // and is reported, instead of failing the whole machine check.
+      const listed = await probe(
+        target.execution,
+        target.machine.os,
+        ANDROID_DEVICE_PROBE_COMMAND,
+        options.signal,
+      );
+      const parsed = listed.ok ? parseAndroidDevices(listed.output) : undefined;
+      const devices = mergeHeldAndroidDevices(
+        parsed ?? [],
+        previousHealth?.android_devices,
+        heldAndroidDevices(store, machine),
+      );
+      health = { ...health, android_devices: devices };
+      if (!parsed)
+        health = {
+          ...health,
+          capability_failures: [
+            ...(health.capability_failures ?? []),
+            {
+              key: "android.device",
+              search_locations: [],
+              reason: "无法列出 adb 真机",
+            },
+          ],
+        };
+      const verified_at = now();
+      const keys = new Set(
+        devices
+          .filter(usableAndroidDevice)
+          .flatMap(androidDeviceCapabilityKeys),
+      );
+      for (const key of [...keys].sort())
+        capabilities.push({
+          key,
+          version: null,
+          verified_at,
+          evidence_ref: `machine-observation:${observation}#android.device`,
+        });
+    }
     const observe =
       options.readiness ?? (options.catalog === undefined && observeReadiness);
     if (

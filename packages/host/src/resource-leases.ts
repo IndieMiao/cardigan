@@ -406,7 +406,7 @@ export class MachineLeases {
         } else if (l.binding && !l.verified_at) return `${key}：等待释放核验`;
       }
     }
-    if (!own?.adb) return this.adb.blocked(machine, keys);
+    if (!own?.adb) return this.adb.blocked(project, machine, keys, now);
   }
   private policySignature(
     machine: string,

@@ -1383,6 +1383,77 @@ test("C-679 a Run's own adb slot sets its port and emulator; a pinned worker por
   );
 });
 
+test("C-813 ANDROID_SERIAL for emulator only, USB device only, and both; Runs without a device on a device machine get ADB_USB=0", () => {
+  const input = {
+    assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },
+    role: roleFor("codex", "codex-agent", "coder"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "test",
+    secrets,
+    worker_env: { ANDROID_ADB_SERVER_PORT: "5137", ADB_USB: "1" },
+  };
+  const emulator = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 0, adb_port: 15100, emulator_port: 5600, usb_off: true },
+  });
+  expect(emulator.env).toMatchObject({
+    ANDROID_ADB_SERVER_PORT: "15100",
+    ANDROID_SERIAL: "emulator-5600",
+    ADB_USB: "0",
+  });
+  expect(emulator.env.CARDIGAN_DEVICE_SERIAL).toBeUndefined();
+  expect(emulator.env.CARDIGAN_EMULATOR_SERIAL).toBeUndefined();
+  expect(surface(emulator)).not.toContain("CARDIGAN_DEVICE_SERIAL");
+  const device = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 1, adb_port: 15101, device: "WGC6R21609003324" },
+  });
+  expect(device.env).toMatchObject({
+    ANDROID_ADB_SERVER_PORT: "15101",
+    ANDROID_SERIAL: "WGC6R21609003324",
+    CARDIGAN_DEVICE_SERIAL: "WGC6R21609003324",
+  });
+  // The device Run's own server must be free to claim USB.
+  expect(device.env.ADB_USB).toBeUndefined();
+  expect(device.env.CARDIGAN_EMULATOR_PORT).toBeUndefined();
+  expect(surface(device)).toContain(
+    "adb --one-device $CARDIGAN_DEVICE_SERIAL start-server",
+  );
+  expect(surface(device)).not.toContain("用户 USB 真机");
+  const both = compileAssignmentLaunch({
+    ...input,
+    adb_slot: {
+      slot: 2,
+      adb_port: 15102,
+      emulator_port: 5604,
+      device: "WGC6R21609003324",
+    },
+  });
+  expect(both.env).toMatchObject({
+    ANDROID_SERIAL: "emulator-5604",
+    CARDIGAN_EMULATOR_SERIAL: "emulator-5604",
+    CARDIGAN_EMULATOR_PORT: "5604",
+    CARDIGAN_DEVICE_SERIAL: "WGC6R21609003324",
+  });
+  expect(both.env.ADB_USB).toBeUndefined();
+  expect(surface(both)).toContain("adb -s $CARDIGAN_DEVICE_SERIAL");
+  expect(() =>
+    compileAssignmentLaunch({
+      ...input,
+      adb_slot: { slot: 1, adb_port: 15101, device: "bad serial;id" },
+    }),
+  ).toThrow("Invalid Android device serial");
+  // Machines without devices keep the worker's ADB_USB and the C-679 env.
+  const plain = compileAssignmentLaunch({
+    ...input,
+    worker_env: { ADB_USB: "1" },
+  });
+  expect(plain.env.ADB_USB).toBe("1");
+});
+
 test("C-497 role and environment expose only this admission; no assigned device never selects user USB", () => {
   const input = {
     assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },

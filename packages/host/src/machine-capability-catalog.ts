@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path";
 import { getHarnessAdapter, HARNESSES } from "@cardigan/roles";
+import { isAndroidDeviceKey } from "./android-devices.js";
 import {
   type CapabilityCommand,
   chromiumSearch,
@@ -137,7 +138,9 @@ export function parseMachineCapabilityCatalog(
     ...custom.map(([key, value]) => {
       if (
         !/^[a-z][a-z0-9.-]{0,63}$/u.test(key) ||
-        BUILTIN_MACHINE_CAPABILITIES.some((c) => c.key === key)
+        BUILTIN_MACHINE_CAPABILITIES.some((c) => c.key === key) ||
+        // C-813: device keys come from the device listing only.
+        isAndroidDeviceKey(key)
       )
         return invalid();
       const entry = object(value);

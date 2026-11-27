@@ -151,6 +151,10 @@ export interface CompileAssignmentInput {
     readonly slot: number;
     readonly adb_port: number;
     readonly emulator_port?: number;
+    /** C-813: serial of the USB device this Run holds exclusively. */
+    readonly device?: string;
+    /** C-813: the machine hands out USB devices; this Run holds none. */
+    readonly usb_off?: true;
   } | null;
   /**
    * C-726: usage notes of the capabilities this work item requires

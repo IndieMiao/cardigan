@@ -61,6 +61,21 @@ export interface MachineHealth {
   /** Non-blocking problems: the machine stays available for dispatch. */
   readonly warnings?: readonly string[];
   readonly readiness?: MachineReadiness;
+  /** C-813: USB Android devices the project account's adb sees; strict patterns only. */
+  readonly android_devices?: readonly AndroidDeviceObservation[];
+}
+/** C-813: `in_use` is a device a Run's own adb server holds right now. */
+export interface AndroidDeviceObservation {
+  readonly serial: string;
+  readonly state:
+    | "authorized"
+    | "unauthorized"
+    | "offline"
+    | "no_permission"
+    | "in_use"
+    | "other";
+  readonly model?: string;
+  readonly android_version?: string;
 }
 export type MachineReadinessStatus =
   | "ok"

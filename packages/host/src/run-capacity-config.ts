@@ -45,6 +45,7 @@ export interface ScarceInactiveCancelConfig {
 /** Resources whose holder blocks others for long; used only when the grace is configured. */
 export const DEFAULT_SCARCE_RESOURCES = [
   "android.emulator",
+  "android.device",
   "ios.simulator",
   "godot",
 ] as const;

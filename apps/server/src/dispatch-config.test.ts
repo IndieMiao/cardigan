@@ -170,7 +170,12 @@ test("C-752: the scarce-resource grace is off by default and only ever shorter",
     inactiveCancelAfterMs: 60 * 60_000,
     scarceInactiveCancel: {
       afterMs: 30 * 60_000,
-      resources: ["android.emulator", "ios.simulator", "godot"],
+      resources: [
+        "android.emulator",
+        "android.device",
+        "ios.simulator",
+        "godot",
+      ],
     },
   });
   await write(
