@@ -247,7 +247,7 @@ async function serveDevices(
         ...(body.projects ? { projects: body.projects as string[] } : {}),
       },
       c.clock,
-      { via: "workbench", member_id: member },
+      { via: "workbench", member_id: member, project_id: project },
     );
   } catch (error) {
     if (error instanceof DeviceRequestError)

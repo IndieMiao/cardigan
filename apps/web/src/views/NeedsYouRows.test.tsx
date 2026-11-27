@@ -8,13 +8,27 @@ import {
   within,
 } from "@testing-library/react";
 import { Profiler } from "react";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { CardiganClient, NeedsDecision, NeedsPage } from "../api.js";
 import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { NeedsYouPage } from "./NeedsYouPage.js";
 
-afterEach(cleanup);
+// Radix checkboxes in a form measure themselves.
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 const decision = (o: Partial<NeedsDecision> = {}): NeedsDecision => ({
   id: "Q-1",
@@ -558,9 +572,8 @@ test("C-817: a discovered device is enabled with one click for the preselected p
   fireEvent.click(row.getByRole("button", { name: "处理 H-8" }));
   const retry = row.getByRole("button", { name: "重试" }) as HTMLButtonElement;
   expect(retry.disabled).toBe(true);
-  changeControl(row.getByLabelText("H-8 给哪个项目用"), {
-    target: { value: "b" },
-  });
+  // C-832: a shared machine ticks one or more projects in the one prompt.
+  fireEvent.click(row.getByRole("checkbox", { name: "H-8 给 b 用" }));
   fireEvent.click(row.getByRole("button", { name: "重试" }));
   await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(2));
   expect(requestMachineDevice.mock.calls[1]?.[4]).toEqual({
@@ -583,4 +596,107 @@ test("C-817: a discovered device is enabled with one click for the preselected p
   fireEvent.click(row.getByRole("button", { name: "不启用" }));
   await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(4));
   expect(completeAction).not.toHaveBeenCalled();
+});
+
+test("C-832: one prompt for a shared machine: tick several projects, previous choices stay ticked, a refusal shows in the prompt and can be retried", async () => {
+  let refuse = true;
+  const requestMachineDevice = vi.fn<
+    NonNullable<CardiganClient["requestMachineDevice"]>
+  >(async () => {
+    if (refuse) throw new Error("设备正在初始化，稍后再试");
+    return { device: { status: "initializing" } } as never;
+  });
+  let loads = 0;
+  const prompt = {
+    machine_id: "mac-mini",
+    type: "android.device",
+    label: "安卓真机",
+    steps: ["插电常亮"],
+    projects: ["cardigan", "sensen"],
+  };
+  const action = (
+    id: string,
+    device_enablement: Record<string, unknown>,
+  ): NeedsPage["human_actions"][number] => ({
+    id,
+    card_id: null,
+    why: "mac-mini 发现安卓真机，给哪些项目用？",
+    instructions: "设备编号：X",
+    expected_return: "点“启用”后系统自动初始化",
+    due: null,
+    waited_ms: 0,
+    blocked_work_items: [],
+    device_enablement: {
+      ...prompt,
+      ...device_enablement,
+    } as NonNullable<NeedsPage["human_actions"][number]["device_enablement"]>,
+  });
+  render(
+    <NeedsYouPage
+      projectId="cardigan"
+      client={fakeClient({
+        needsYou: async () => {
+          loads++;
+          return {
+            ...data,
+            decisions: [],
+            human_actions: [
+              action("H-283", { device_id: "D1", phase: "pending" }),
+              action("H-284", {
+                device_id: "D2",
+                phase: "failed",
+                chosen: ["sensen", "cardigan"],
+              }),
+            ],
+          };
+        },
+        requestMachineDevice,
+      })}
+    />,
+  );
+  const panel = await openTab("待你执行");
+  let row = within(await panel.findByRole("article", { name: "执行 H-283" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 H-283" }));
+  // The system's own prompt: no requester line.
+  expect(row.queryByText(/未知角色/u)).toBeNull();
+  const enable = row.getByRole("button", { name: "启用" }) as HTMLButtonElement;
+  expect(enable.disabled).toBe(true);
+  fireEvent.click(row.getByRole("checkbox", { name: "H-283 给 sensen 用" }));
+  fireEvent.click(row.getByRole("checkbox", { name: "H-283 给 cardigan 用" }));
+  fireEvent.click(enable);
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(1));
+  // Listed in the prompt's order, whatever order they were ticked in.
+  expect(requestMachineDevice.mock.calls[0]).toEqual([
+    "cardigan",
+    "mac-mini",
+    "android.device",
+    "D1",
+    { request: "enable", projects: ["cardigan", "sensen"] },
+  ]);
+  // The refusal stays in the prompt; nothing is assumed changed.
+  const form = within(row.getByRole("form", { name: "H-283 启用设备" }));
+  expect((await form.findByRole("alert")).textContent).toContain(
+    "设备正在初始化，稍后再试",
+  );
+  const before = loads;
+  refuse = false;
+  fireEvent.click(row.getByRole("button", { name: "启用" }));
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(2));
+  // Success: the page reads the server's state again.
+  await waitFor(() => expect(loads).toBeGreaterThan(before));
+
+  row = within(await panel.findByRole("article", { name: "执行 H-284" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 H-284" }));
+  for (const p of ["cardigan", "sensen"])
+    expect(
+      row
+        .getByRole("checkbox", { name: `H-284 给 ${p} 用` })
+        .getAttribute("aria-checked"),
+    ).toBe("true");
+  fireEvent.click(row.getByRole("button", { name: "重试" }));
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(3));
+  expect(requestMachineDevice.mock.calls[2]?.[4]).toEqual({
+    request: "enable",
+    projects: ["cardigan", "sensen"],
+  });
 });

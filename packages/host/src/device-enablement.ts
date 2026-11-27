@@ -103,6 +103,7 @@ function enablePrompt(reg: DeviceRegistration, projects: readonly string[]) {
   const provider = deviceProvider(reg.type);
   const steps = (provider?.init_steps ?? []).map((s) => s.title);
   const preselected = preselectedDeviceProject(projects);
+  const chosen = reg.projects.filter((p) => projects.includes(p));
   const phase =
     reg.status === "initializing"
       ? "initializing"
@@ -121,7 +122,7 @@ function enablePrompt(reg: DeviceRegistration, projects: readonly string[]) {
   return {
     instructions: lines.join("\n"),
     // The row title: the question itself.
-    why_human: `${reg.machine} 发现${name}，给 ${preselected ?? "哪个项目"} 用？`,
+    why_human: `${reg.machine} 发现${name}，给${preselected ? ` ${preselected} ` : "哪些项目"}用？`,
     expected_return: "点“启用”后系统自动初始化，成功后这条待办自动结项。",
     device_enablement: {
       machine_id: reg.machine,
@@ -131,6 +132,7 @@ function enablePrompt(reg: DeviceRegistration, projects: readonly string[]) {
       ...(reg.model ? { model: reg.model } : {}),
       projects: [...projects],
       ...(preselected ? { preselected } : {}),
+      ...(chosen.length ? { chosen } : {}),
       steps,
       phase,
       ...(phase === "failed" && reg.failure ? { failure: reg.failure } : {}),
@@ -206,12 +208,75 @@ function reconcile(
   );
 }
 
+/** Every project's enable prompts for this device, in project creation order. */
+function devicePrompts(store: Store, reg: DeviceRegistration) {
+  return store.uow.read((tx) =>
+    store.listProjects().map((p) => ({
+      project: p.id,
+      prompts: tx.human_actions
+        .list(p.id)
+        .filter(
+          (h) =>
+            h.requested_by === "system" &&
+            !h.card_id &&
+            h.device_enablement?.machine_id === reg.machine &&
+            h.device_enablement.type === reg.type &&
+            h.device_enablement.device_id === reg.id,
+        ),
+    })),
+  );
+}
+
+/**
+ * C-832: one enable prompt per device. A new one is raised only in the
+ * machine's first project in creation order (the one the Workbench opens
+ * first), only while no project asks yet and not when a person dismissed
+ * the same prompt in another project; prompts raised per project before
+ * keep following the device. Once a person answered, one prompt remains:
+ * the one in `prefer` (where they answered), else the first.
+ */
+function promptPlan(
+  store: Store,
+  project: string,
+  projects: readonly string[],
+  reg: DeviceRegistration,
+  prefer: string | undefined,
+  shown: unknown,
+): "open" | "skip" | { readonly merged_into: string } {
+  const all = devicePrompts(store, reg);
+  const asking = all
+    .filter(
+      (e) =>
+        projects.includes(e.project) &&
+        e.prompts.some((h) => h.status === "open"),
+    )
+    .map((e) => e.project);
+  if (!asking.includes(project)) {
+    const home = all.find((e) => projects.includes(e.project))?.project;
+    const dismissed = all.some(
+      (e) =>
+        e.project !== project &&
+        e.prompts.some(
+          (h) =>
+            h.status === "cancelled" &&
+            h.cancellation?.source !== "device_rechecked" &&
+            JSON.stringify(h.device_enablement) === JSON.stringify(shown),
+        ),
+    );
+    return !asking.length && project === home && !dismissed ? "open" : "skip";
+  }
+  if (reg.status === "pending" || asking.length < 2) return "open";
+  const keep = prefer && asking.includes(prefer) ? prefer : asking[0];
+  return !keep || project === keep ? "open" : { merged_into: keep };
+}
+
 /** Bring this project's device to-dos for one machine in line with the registry. */
 export function syncDeviceActions(
   store: Store,
   project: string,
   machine: string,
   clock: Clock,
+  prefer?: string,
 ) {
   const registry = new DeviceRegistry(store);
   const regs = registry.list(machine);
@@ -234,12 +299,27 @@ export function syncDeviceActions(
     if (!DEVICE_PROVIDERS.some((p) => p.type === reg.type)) continue;
     const key = (kind: "enable" | "unavailable") =>
       deviceActionKey(kind, machine, reg.type, reg.id);
-    if (["pending", "initializing", "failed"].includes(reg.status))
-      reconcile(store, project, clock, {
-        key: key("enable"),
-        open: enablePrompt(reg, projects),
-      });
-    else
+    if (["pending", "initializing", "failed"].includes(reg.status)) {
+      const prompt = enablePrompt(reg, projects);
+      const plan = promptPlan(
+        store,
+        project,
+        projects,
+        reg,
+        prefer,
+        prompt.device_enablement,
+      );
+      if (plan === "open")
+        reconcile(store, project, clock, { key: key("enable"), open: prompt });
+      else if (plan !== "skip")
+        reconcile(store, project, clock, {
+          key: key("enable"),
+          close: {
+            outcome: "cancelled",
+            text: `同一台设备已在 ${plan.merged_into} 的提示里处理`,
+          },
+        });
+    } else
       reconcile(store, project, clock, {
         key: key("enable"),
         close:
@@ -287,14 +367,18 @@ export function syncDeviceActions(
   }
 }
 
-/** After a registry change: every project registering the machine. */
+/**
+ * After a registry change: every project registering the machine. `prefer`
+ * is the project whose prompt the person answered (C-832).
+ */
 export function syncDeviceActionsEverywhere(
   store: Store,
   machine: string,
   clock: Clock,
+  prefer?: string,
 ) {
   for (const project of machineProjects(store, machine))
-    syncDeviceActions(store, project, machine, clock);
+    syncDeviceActions(store, project, machine, clock, prefer);
 }
 
 /**
@@ -307,7 +391,12 @@ export function requestDevice(
   store: Store,
   input: Omit<Parameters<DeviceRegistry["request"]>[0], "now">,
   clock: Clock,
-  audit: { via: "cli" | "workbench"; member_id?: string } = { via: "cli" },
+  audit: {
+    via: "cli" | "workbench";
+    member_id?: string;
+    /** The project whose page the request came from (Workbench). */
+    project_id?: string;
+  } = { via: "cli" },
 ) {
   const reg = new DeviceRegistry(store).request({ ...input, now: clock.now() });
   store.uow.run((tx) =>
@@ -325,9 +414,10 @@ export function requestDevice(
         projects: [...reg.projects],
         via: audit.via,
         ...(audit.member_id ? { member_id: audit.member_id } : {}),
+        ...(audit.project_id ? { project_id: audit.project_id } : {}),
       },
     }),
   );
-  syncDeviceActionsEverywhere(store, input.machine, clock);
+  syncDeviceActionsEverywhere(store, input.machine, clock, audit.project_id);
   return reg;
 }

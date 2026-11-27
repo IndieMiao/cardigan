@@ -201,6 +201,43 @@
   .body > :where(:first-child) {
     margin-top: 0;
   }
+  /* C-832: checkboxes side by side under their legend; buttons at own width. */
+  .choices {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  .choices legend {
+    padding: 0;
+    margin-block-end: var(--ui-space-1);
+  }
+  .choiceList {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--ui-space-4);
+  }
+  .choice {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    min-height: var(--ui-control);
+  }
+  .formActions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--ui-space-2);
+  }
+  .formFeedback :global(.request-feedback-region) {
+    position: static;
+    align-items: flex-start;
+    max-width: none;
+    max-height: none;
+  }
+  .formFeedback:not(:has(:global(.request-feedback):not(:empty))) {
+    display: none;
+  }
 
   @media (max-width: 760px) {
     .head {

@@ -1,7 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { HumanAction } from "@cardigan/domain";
+import {
+  cancelHumanAction,
+  deviceActionKey,
+  type HumanAction,
+  reconcileDeviceAction,
+} from "@cardigan/domain";
+import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -221,16 +227,18 @@ test("C-817: no result, an unauthorized or missing device fail with a plain reas
   expect(initCalls()).toHaveLength(1);
 });
 
-test("C-817: a shared machine asks without preselecting; the initialization runs as a chosen project's account, once", async () => {
+test("C-817/C-832: a shared machine asks once without preselecting; the initialization runs as a chosen project's account, once", async () => {
   store.createProject({ id: "b" });
   await check("a");
   await check("b");
-  for (const p of ["a", "b"]) {
-    const [prompt] = open(p);
-    expect(prompt?.device_enablement).toMatchObject({ projects: ["a", "b"] });
-    expect(prompt?.device_enablement?.preselected).toBeUndefined();
-    expect(prompt?.why_human).toContain("给 哪个项目 用？");
-  }
+  // C-832: one prompt for the device, in the machine's first project.
+  expect(open("b")).toEqual([]);
+  expect(open("a")).toHaveLength(1);
+  const [prompt] = open("a");
+  expect(prompt?.device_enablement).toMatchObject({ projects: ["a", "b"] });
+  expect(prompt?.device_enablement?.preselected).toBeUndefined();
+  expect(prompt?.device_enablement?.chosen).toBeUndefined();
+  expect(prompt?.why_human).toBe("local 发现安卓真机 MRR-W39，给哪些项目用？");
   expect(() => request("enable", ["c"])).toThrow(DeviceRequestError);
   expect(() => request("enable", [])).toThrow(DeviceRequestError);
   // Only b's account sees the device: b initializes it.
@@ -239,6 +247,11 @@ test("C-817: a shared machine asks without preselecting; the initialization runs
   listing = plugged();
   await check("b");
   expect(request("enable", ["a", "b"]).init_project).toBe("b");
+  expect(open("a")[0]?.device_enablement).toMatchObject({
+    phase: "initializing",
+    chosen: ["a", "b"],
+  });
+  expect(open("b")).toEqual([]);
   await check("a");
   expect(initCalls()).toHaveLength(0);
   await check("b");
@@ -249,6 +262,162 @@ test("C-817: a shared machine asks without preselecting; the initialization runs
   // While initializing, a second enable is refused; the claim is single.
   request("disable");
   expect(request("enable").status).toBe("enabled");
+});
+
+/** A prompt raised per project before C-832: a copy of a's in `project`. */
+function legacyPrompt(project: string) {
+  const [source] = open("a");
+  if (!source?.device_enablement) throw new Error("missing prompt");
+  store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      project,
+      unwrap(
+        reconcileDeviceAction(
+          loadCommandState(tx, project),
+          { kind: "system", project_id: project },
+          {
+            key: deviceActionKey("enable", "local", TYPE, SERIAL),
+            open: {
+              instructions: source.instructions,
+              why_human: source.why_human,
+              expected_return: source.expected_return,
+              device_enablement: source.device_enablement,
+              reopen_key: "legacy",
+            },
+          },
+          { ids: tx.ids, clock: { now: () => at } },
+        ),
+      ),
+    ),
+  );
+  const [legacy] = open(project);
+  if (!legacy) throw new Error("missing legacy prompt");
+  return legacy;
+}
+
+/** The owner closes a prompt themselves. */
+function dismiss(project: string, id: HumanAction["id"]) {
+  store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      project,
+      unwrap(
+        cancelHumanAction(
+          loadCommandState(tx, project),
+          { kind: "human", project_id: project },
+          { human_action_id: id, reason: "先不用" },
+          { ids: tx.ids, clock: { now: () => at } },
+        ),
+      ),
+    ),
+  );
+}
+
+test("C-832: a new device prompts only in the machine's first project, whichever project's check saw it", async () => {
+  store.createProject({ id: "b" });
+  await check("b");
+  expect(open("b")).toEqual([]);
+  expect(open("a").map((h) => h.device_enablement?.projects)).toEqual([
+    ["a", "b"],
+  ]);
+  await check("a");
+  await check("b");
+  expect(actions("a")).toHaveLength(1);
+  expect(actions("b")).toEqual([]);
+});
+
+test("C-832: per-project prompts raised before: answering one closes the others; the answered one stays and finishes", async () => {
+  store.createProject({ id: "b" });
+  await check("a");
+  const legacy = legacyPrompt("b");
+  // Checks keep both old prompts in step while nobody answered.
+  await check("b");
+  expect(open("a")).toHaveLength(1);
+  expect(open("b").map((h) => h.id)).toEqual([legacy.id]);
+  requestDevice(
+    store,
+    {
+      machine: "local",
+      type: TYPE,
+      id: SERIAL,
+      request: "enable",
+      projects: ["a", "b"],
+    },
+    { now: () => at },
+    { via: "workbench", project_id: "b" },
+  );
+  expect(open("a")).toEqual([]);
+  expect(actions("a")[0]).toMatchObject({
+    status: "cancelled",
+    cancellation: expect.objectContaining({
+      reason: "同一台设备已在 b 的提示里处理",
+      source: "device_rechecked",
+    }),
+  });
+  expect(open("b")[0]).toMatchObject({
+    id: legacy.id,
+    device_enablement: { phase: "initializing", chosen: ["a", "b"] },
+  });
+  await check("a");
+  expect(open("a")).toEqual([]);
+  await check("b");
+  expect(registry().get("local", TYPE, SERIAL)?.status).toBe("enabled");
+  expect(actions("a")).toHaveLength(1);
+  expect(actions("b")).toEqual([
+    expect.objectContaining({ id: legacy.id, status: "done" }),
+  ]);
+});
+
+test("C-832: a prompt a person dismissed after the merge does not come back in another project in the same state", async () => {
+  store.createProject({ id: "b" });
+  await check("a");
+  const legacy = legacyPrompt("b");
+  init = result({ result: "failed", step: "lock_screen" });
+  requestDevice(
+    store,
+    {
+      machine: "local",
+      type: TYPE,
+      id: SERIAL,
+      request: "enable",
+      projects: ["a", "b"],
+    },
+    { now: () => at },
+    { via: "workbench", project_id: "b" },
+  );
+  await check("a");
+  expect(open("b")[0]?.device_enablement?.phase).toBe("failed");
+  expect(open("a")).toEqual([]);
+  dismiss("b", legacy.id);
+  await check("a");
+  await check("b");
+  expect(open("a")).toEqual([]);
+  expect(open("b")).toEqual([]);
+  // A new state asks again, in the machine's first project.
+  request("enable");
+  expect(open("a").map((h) => h.device_enablement?.phase)).toEqual([
+    "initializing",
+  ]);
+  expect(open("b")).toEqual([]);
+});
+
+test("C-832: dismissing one old per-project prompt leaves the other project's prompt", async () => {
+  store.createProject({ id: "b" });
+  await check("a");
+  const legacy = legacyPrompt("b");
+  dismiss("b", legacy.id);
+  await check("a");
+  await check("b");
+  expect(open("a")).toHaveLength(1);
+  expect(open("b")).toEqual([]);
+  // A CLI answer (no project) keeps the machine's first project's prompt.
+  request("enable", ["b"]);
+  expect(open("a")[0]?.device_enablement).toMatchObject({
+    phase: "initializing",
+    chosen: ["b"],
+  });
+  expect(open("b")).toEqual([]);
 });
 
 test("C-817: disabling closes the prompt and stops dispatch; a disable during initialization wins", async () => {

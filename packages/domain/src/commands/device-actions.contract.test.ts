@@ -298,3 +298,59 @@ test("C-817: a prompt dismissed after an in-place update stays closed in the sta
     ).events,
   ).toEqual([]);
 });
+
+test("C-832: the projects a person chose ride along in place on the one prompt", () => {
+  const io = ports();
+  let state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const shared = (
+    phase: DeviceEnablementPrompt["phase"],
+    chosen?: string[],
+  ): DeviceActionOpen => {
+    const { preselected: _one, ...rest } = prompt(phase);
+    return {
+      ...open(phase),
+      device_enablement: {
+        ...rest,
+        projects: ["cardigan", "sensen"],
+        ...(chosen ? { chosen } : {}),
+      },
+    };
+  };
+  state = apply(
+    state,
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: shared("pending") },
+        io,
+      ),
+    ),
+  );
+  const id = state.human_actions[0]?.id;
+  state = apply(
+    state,
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: shared("failed", ["cardigan", "sensen"]) },
+        io,
+      ),
+    ),
+  );
+  expect(state.human_actions).toHaveLength(1);
+  expect(state.human_actions[0]).toMatchObject({
+    id,
+    status: "open",
+    device_enablement: {
+      phase: "failed",
+      projects: ["cardigan", "sensen"],
+      chosen: ["cardigan", "sensen"],
+    },
+  });
+  expect(
+    state.human_actions[0]?.device_enablement?.preselected,
+  ).toBeUndefined();
+});
