@@ -121,6 +121,8 @@ export interface ServerEnv extends ExecutionEnv {
   readonly CARDIGAN_DATA_DIR?: string | undefined;
   /** C-216: `1` turns on the periodic-loop profiler; default off. */
   readonly CARDIGAN_TICK_PROFILE?: string | undefined;
+  /** C-835: hourly heap history points kept per process; default 48. */
+  readonly CARDIGAN_PROCESS_HEALTH_HISTORY_POINTS?: string | undefined;
   readonly CARDIGAN_CHECK_LOG_READ_BYTES?: string | undefined;
   readonly CARDIGAN_CHECK_LOG_ATTEMPT_BYTES?: string | undefined;
   readonly CARDIGAN_MCP_HOST?: string | undefined;

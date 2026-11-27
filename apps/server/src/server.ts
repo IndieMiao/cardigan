@@ -103,7 +103,10 @@ import {
 import { recordStorageCors } from "./offsite-cors-notice.js";
 import { OFFSITE_SYNC_INTERVAL_MS, OffsiteSync } from "./offsite-sync.js";
 import { serverProbes } from "./probes.js";
-import { publishProcessHealth } from "./process-health.js";
+import {
+  processHealthHistoryPoints,
+  publishProcessHealth,
+} from "./process-health.js";
 import {
   resumeInterruptedPublications,
   trackedPublisher,
@@ -351,9 +354,12 @@ async function assembleServer(
     sha,
   });
   // C-638: the web process reads this for the health page (heap vs limit).
+  // C-835: both production roles also keep an hourly short history.
   const stopHealth =
-    options.role === "background"
-      ? publishProcessHealth(config.dataDir, "background")
+    options.role !== undefined
+      ? publishProcessHealth(config.dataDir, options.role, {
+          historyPoints: processHealthHistoryPoints(runtimeEnv, warnLine),
+        })
       : undefined;
   // C-636: always-on repository lock wait/hold times, by operation.
   const lockMetrics = new RepositoryLockMetrics({
