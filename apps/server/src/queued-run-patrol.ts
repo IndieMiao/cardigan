@@ -11,6 +11,7 @@ import {
   type ReadProjectQuota,
   type ReadResourceLimits,
   type RunCapacityBlock,
+  resolveResourceAlternatives,
   runCapacitySnapshot,
   runResourceKeys,
 } from "@cardigan/host";
@@ -100,33 +101,42 @@ export class QueuedRunPatrol {
           effectiveRunLimit(store, a.machine_id, runLimit, runLimitMaximum);
         // C-714: free machine slots alone do not mean this Run can start.
         // C-721: name only the resources this Run itself would claim.
+        // C-815: an `android.any` Run is named by the option it would take.
+        const snapshot = capacity;
         if (spare)
           block = capacity.capacityBlock(
             project,
             a,
-            runResourceKeys(
-              tx,
+            resolveResourceAlternatives(
+              store,
               project,
               a,
-              state.events,
-              run,
-              // Notices the owner already acknowledged ride on no bell.
-              store
-                .listNotifications({
-                  project_id: project,
-                  status: "pending",
-                  assignment_id: a.id,
-                })
-                .filter(
-                  (n) =>
-                    !state.cursors.some(
-                      (c) =>
-                        c.assignment_id === a.id &&
-                        c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
-                        c.acked_seq >= n.seq,
-                    ),
-                ),
-              state.timeline,
+              runResourceKeys(
+                tx,
+                project,
+                a,
+                state.events,
+                run,
+                // Notices the owner already acknowledged ride on no bell.
+                store
+                  .listNotifications({
+                    project_id: project,
+                    status: "pending",
+                    assignment_id: a.id,
+                  })
+                  .filter(
+                    (n) =>
+                      !state.cursors.some(
+                        (c) =>
+                          c.assignment_id === a.id &&
+                          c.card_id === (n.card_id ?? PROJECT_EVENT_STREAM) &&
+                          c.acked_seq >= n.seq,
+                      ),
+                  ),
+                state.timeline,
+              ),
+              at,
+              () => snapshot,
             ),
           );
       }

@@ -72,6 +72,7 @@ import {
   confirmReviewNotSent,
   finishBellAttempt,
   getRoleVersion,
+  type ReadRepositories,
   recordToolCatalogSnapshot,
   type Store,
   unfinishedBellAttempts,
@@ -98,6 +99,7 @@ import {
   withPreparationQueue,
 } from "./preparation-queue.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
+import { resolveResourceAlternatives } from "./resource-alternatives.js";
 import type { MachineLeases, ResourceAccess } from "./resource-leases.js";
 import {
   RetainedWriterRefused,
@@ -400,8 +402,34 @@ async function launchWithClaim(
   const owner = host.store.uow.read((tx) =>
     tx.assignments.get(input.project, input.assignment_id),
   );
+  // C-815: the same `android.any` choice before inspection and in the claim.
+  const resolvedKeys = (
+    tx: ReadRepositories,
+    a: Assignment,
+    project: string = input.project,
+  ) =>
+    resolveResourceAlternatives(
+      host.store,
+      project,
+      a,
+      assignmentResourceKeys(tx, project, a),
+      clock.now(),
+      () =>
+        runCapacitySnapshot(
+          host.store,
+          tx,
+          host.resourceLimits,
+          host.projectQuota,
+        ),
+      host.leases,
+    );
   const inspection =
-    owner && (await host.leases?.inspect(input.project, owner));
+    owner &&
+    (await host.leases?.inspect(
+      input.project,
+      owner,
+      host.store.uow.read((tx) => resolvedKeys(tx, owner)),
+    ));
   let access: ResourceAccess | undefined;
   const attempt = host.store.uow.run((tx) => {
     const run = tx.runs.get(input.project, input.run.id);
@@ -455,7 +483,7 @@ async function launchWithClaim(
       host.projectQuota,
     );
     const slots = capacity.resourcesForMachine(assignment.machine_id);
-    const keys = assignmentResourceKeys(tx, input.project, assignment);
+    const keys = resolvedKeys(tx, assignment);
     const denied = host.leases?.blocked(
       input.project,
       assignment.machine_id,
@@ -524,6 +552,8 @@ async function launchWithClaim(
                 capacity.withinProjectQuota(p, o) &&
                 !host.leases?.waitingElsewhere(p, o, clock.now(), tx),
               host.leases?.config.preferred(assignment.machine_id),
+              // C-815: an `android.any` waiter is judged by its free option.
+              (entry, o) => resolvedKeys(tx, o, entry.project_id),
             ))))
     ) {
       return undefined;

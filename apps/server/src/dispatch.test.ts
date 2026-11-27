@@ -47,6 +47,8 @@ import { loadCommandState, persistEffect, unwrap } from "@cardigan/mcp-server";
 import {
   beginBellAttempt,
   beginLaunchAttempt,
+  beginMachineObservation,
+  completeMachineObservation,
   listBellAttempts,
   PROJECT_EVENT_STREAM,
   persistRunLimitEffect,
@@ -1910,6 +1912,106 @@ test("C-620 a head waiting on an occupied emulator does not hold back later godo
   expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
     emulatorLater.assignment.id,
   ]);
+});
+
+test("C-815 android.any is dispatched on whichever of emulator and device has room and queues while both are full; android.emulator alone still waits", async () => {
+  const resourceLimits = () =>
+    new Map([
+      ["android.emulator", 1],
+      ["android.device", 1],
+    ]);
+  const settings = { ...options, runLimit: () => 6, resourceLimits };
+  const actor = { kind: "system" as const, project_id: f.project };
+  beginMachineObservation(
+    f.store,
+    actor,
+    f.project,
+    "local",
+    "obs-1",
+    f.clock.now(),
+  );
+  completeMachineObservation(
+    f.store,
+    actor,
+    f.project,
+    "local",
+    "obs-1",
+    {
+      status: "passed",
+      checked_at: f.clock.now(),
+      blockers: [],
+      launch_enabled: true,
+    },
+    ["android.emulator", "android.device", "android.any"].map((key) => ({
+      key,
+      version: null,
+      verified_at: f.clock.now(),
+      evidence_ref: `machine-observation:obs-1#${key}`,
+    })),
+  );
+  // The only emulator slot is held.
+  const holder = f.create();
+  requireCapabilities(holder.item, ["android.emulator"]);
+  f.session(holder.assignment, false);
+  requireCapabilities(target.item, ["android.any"]);
+  instruct();
+  await new Dispatcher(settings).tick();
+  const latest = (a: Assignment) =>
+    f
+      .state()
+      .runs.filter((r) => r.assignment_id === a.id)
+      .at(-1);
+  expect(latest(target.assignment)).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["android.any", "android.device"],
+  });
+  // Both full: the next android.any Run and an emulator-only Run queue.
+  const anyLater = f.create();
+  requireCapabilities(anyLater.item, ["android.any"]);
+  f.session(anyLater.assignment);
+  const emulatorLater = f.create();
+  requireCapabilities(emulatorLater.item, ["android.emulator"]);
+  f.session(emulatorLater.assignment);
+  for (const t of [anyLater, emulatorLater]) {
+    f.advance(100);
+    f.apply((s, a, p) =>
+      issueInstruction(
+        s,
+        a,
+        { card_id: t.card.id, work_item_id: t.item.id, body: "work" },
+        p,
+      ),
+    );
+  }
+  await new Dispatcher(settings).tick();
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    anyLater.assignment.id,
+    emulatorLater.assignment.id,
+  ]);
+  // The device frees up first: the android.any Run takes it, the emulator-only
+  // Run keeps waiting for the emulator.
+  const admitted = latest(target.assignment);
+  if (!admitted) throw new Error("Missing admission");
+  f.apply(
+    (s, a, p) => acknowledgeRun(s, a, { run_id: admitted.id }, p),
+    f.actorFor(target.assignment),
+  );
+  finish(target.assignment);
+  await new Dispatcher(settings).tick();
+  expect(latest(anyLater.assignment)).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["android.any", "android.device"],
+  });
+  expect(readRunQueue(f.store).map((r) => r.assignment_id)).toEqual([
+    emulatorLater.assignment.id,
+  ]);
+  expect(
+    f.store.uow.read((tx) =>
+      runCapacitySnapshot(f.store, tx, resourceLimits)
+        .resourcesForMachine("local")
+        .get("android.device"),
+    ),
+  ).toMatchObject({ occupied: 1, limit: 1 });
 });
 
 /** C-721: a recording Run holds the only godot and emulator slots. */

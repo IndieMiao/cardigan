@@ -1,5 +1,6 @@
 import {
   type Assignment,
+  BUILTIN_CAPABILITY_NOTES,
   type CapabilityGuideEntry,
   HOST_OPS_ROLE_TOOLS,
   STANDING_ROLE_TOOLS,
@@ -143,6 +144,12 @@ test("C-726 get_capability_guide reads the caller's project notes for its machin
     // Another machine's supplement never shows; an unknown key is null.
     expect((await call(b, { capability: "godot" })).body).toMatchObject({
       usage_note: null,
+      machine_note: null,
+    });
+    // C-815: without a project note, android.any reads the built-in one.
+    expect((await call(b, { capability: "android.any" })).body).toMatchObject({
+      key: "android.any",
+      usage_note: BUILTIN_CAPABILITY_NOTES["android.any"],
       machine_note: null,
     });
     expect(await call(b, { topic: "test-accounts" })).toEqual({

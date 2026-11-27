@@ -110,6 +110,8 @@ test("private custom catalog cannot replace builtins or load unsafe files", () =
     // C-813: device keys only come from the device listing.
     { "android.device": { check: ["true"] } },
     { "android.device.model.x": { check: ["true"] } },
+    // C-815: alternatives are rolled up from their options.
+    { "android.any": { check: ["true"] } },
   ])
     expect(() =>
       parseMachineCapabilityCatalog({ version: 1, capabilities: custom }),
@@ -895,6 +897,8 @@ test("C-813: machine check asks each device provider; devices and their states a
       tablet,
     ]);
     expect(keys(first)).toEqual([
+      // C-815: a usable device also provides 安卓设备任一.
+      "android.any",
       "android.device",
       "android.device.model.mrr-w39",
       "android.device:WGC6R21609003324",
@@ -945,6 +949,7 @@ test("C-813: machine check asks each device provider; devices and their states a
       },
     ]);
     expect(keys(held)).toContain("android.device");
+    expect(keys(held)).toContain("android.any");
     // An unreadable listing is reported but does not fail the machine.
     listing = { ok: false, output: "" };
     const failed = await refreshMachineObservations(options);
@@ -964,6 +969,76 @@ test("C-813: machine check asks each device provider; devices and their states a
     expect(
       probe.mock.calls.some(([, , c]) => c === ANDROID_DEVICE_PROBE_COMMAND),
     ).toBe(false);
+  } finally {
+    store.close();
+  }
+});
+
+test("C-815: 安卓设备任一 is provided by a verified emulator or a usable device, and by nothing else", async () => {
+  const store = Store.open({ dataDir: temp() });
+  try {
+    store.createProject({ id: "a" });
+    const machine = () => {
+      const registered = store.uow.read((tx) => tx.machines.get("a", "local"));
+      if (!registered) throw new Error("Missing fixture machine");
+      return registered;
+    };
+    const execution: ExecutionConfig = { mode: "local", dataDir: temp() };
+    const installed = new Set(["adb", "emulator"]);
+    let devices: unknown[] = [];
+    const probe = vi.fn(
+      async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
+        if (command === ANDROID_DEVICE_PROBE_COMMAND)
+          return { ok: true, output: JSON.stringify({ devices }) };
+        const binary = Array.isArray(command) ? command[0] : undefined;
+        return binary && installed.has(binary)
+          ? { ok: true, output: `${binary} 36.1.9` }
+          : { ok: false, output: "" };
+      },
+    );
+    const options = {
+      store,
+      project: "a",
+      machine: "local",
+      target: () => ({ execution, machine: machine() }),
+      check: async () => ({ blockers: [], launch_enabled: true }),
+      catalog: () =>
+        BUILTIN_MACHINE_CAPABILITIES.filter((c) =>
+          ["android.sdk", "android.emulator"].includes(c.key),
+        ),
+      probe,
+      deviceProviders: [androidDeviceProvider],
+      now: () => "2026-11-25T00:00:00.000Z",
+    };
+    const keys = (r: Awaited<ReturnType<typeof refreshMachineObservations>>) =>
+      r.capabilities.map((c) => c.key).sort();
+    // Emulator only.
+    const emulator = await refreshMachineObservations(options);
+    expect(keys(emulator)).toEqual([
+      "android.any",
+      "android.emulator",
+      "android.sdk",
+    ]);
+    expect(
+      emulator.capabilities.find((c) => c.key === "android.any"),
+    ).toMatchObject({ version: null });
+    // Neither: the SDK alone is no Android device.
+    installed.delete("emulator");
+    expect(keys(await refreshMachineObservations(options))).toEqual([
+      "android.sdk",
+    ]);
+    // An unauthorized device is no Android device either; an authorized one is.
+    devices = [{ serial: "WGC6R21609003324", state: "unauthorized" }];
+    expect(keys(await refreshMachineObservations(options))).toEqual([
+      "android.sdk",
+    ]);
+    devices = [{ serial: "WGC6R21609003324", state: "device" }];
+    expect(keys(await refreshMachineObservations(options))).toEqual([
+      "android.any",
+      "android.device",
+      "android.device:WGC6R21609003324",
+      "android.sdk",
+    ]);
   } finally {
     store.close();
   }

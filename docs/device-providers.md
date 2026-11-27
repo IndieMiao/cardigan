@@ -11,6 +11,10 @@
 - **释放**：Run 结束、没有进行中的启动、并且它的 adb 槽位（如有）已经关闭后释放租约。
 - **会话**：Run 启动时，框架把提供方给出的环境变量（只允许 `ANDROID_SERIAL` 或 `CARDIGAN_*`，值只能是编号类的普通字符）和一句提示规则交给会话。
 
+## 多选一的要求（`android.any`）
+
+“安卓设备任一”是一个多选一的能力（domain `CAPABILITY_ALTERNATIVES`）：选项是 `android.emulator` 和 `android.device`。机器检查在任一选项验证通过后登记它；派发前和领取时（同样的输入得到同样的结果）按顺序选第一个空闲的选项，没有空闲的就等机器具备的第一个，下一次派发再重新选。Run 同时占 `android.any` 和选中的选项，名额、adb 槽位和设备租约都按选项处理。新增一种设备提供方时，如果它也能替代某类设备，把它加进对应多选一的选项即可。见 [C-815 计划](plans/C-815.md)。
+
 ## 新增一个提供方要做的
 
 1. 在 `packages/host/src/` 新建 `<名字>-device-provider.ts`，导出一个 `HostDeviceProvider`（定义在 `device-provider-host.ts`，实现 domain 的 `DeviceProviderPort`）：
