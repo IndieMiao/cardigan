@@ -203,6 +203,9 @@ export function confirmKeptShellExit(
   });
 }
 
+/** C-838: why an ended turn's session was idle when it was released. */
+export type TurnDoneIdleBasis = "terminal_status" | "bound_idle_prompt";
+
 /** C-730: what asked for a stale session to be released. */
 export type UnresponsiveRelease =
   /** Session maintenance: this many `probe_invalid` withdrawals in a row. */
@@ -226,13 +229,17 @@ export type UnresponsiveRelease =
    * C-759: the last turn of this session ended, its CLI reports `done`, and
    * the never-started `queued_run_id` waited `waited_ms` without the session
    * being used (for example a resource machine that needs a fresh session),
-   * while the checkout was clean.
+   * while the checkout was clean. C-838: hc has no activity for Claude Code
+   * or Codex (`unknown`); their bound empty editor with the CLI's own idle
+   * footer is the equivalent evidence (`idle_basis=bound_idle_prompt`).
    */
   | {
       readonly trigger: "turn_done";
       readonly queued_run_id: RunId;
       readonly waited_ms: number;
       readonly workspace: "clean" | "no_worktree";
+      /** Omitted: `terminal_status` (the CLI reported `done`). */
+      readonly idle_basis?: TurnDoneIdleBasis;
     }
   /**
    * C-739: the system finished this Run, work is waiting for the Assignment,
@@ -419,7 +426,10 @@ export function releaseUnresponsiveSession(
           ["clean", "no_worktree"].includes(p.workspace) &&
           (p.trigger === "system_turn" ||
             (p.trigger === "turn_done" &&
-              /^R-[1-9][0-9]*$/u.test(p.queued_run_id)) ||
+              /^R-[1-9][0-9]*$/u.test(p.queued_run_id) &&
+              [undefined, "terminal_status", "bound_idle_prompt"].includes(
+                p.idle_basis,
+              )) ||
             (p.trigger === "retirement_withdrawn" &&
               Number.isSafeInteger(p.withdrawals) &&
               p.withdrawals >= 2 &&
@@ -489,7 +499,7 @@ export function releaseUnresponsiveSession(
       : "";
     const handoff =
       p.trigger === "turn_done"
-        ? `${a.id}（${a.machine_id}）上一轮已结束、会话空闲（done），排队的 ${p.queued_run_id} ${Math.round(p.waited_ms / 60_000)} 分钟仍未开始，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
+        ? `${a.id}（${a.machine_id}）上一轮已结束、会话空闲（${p.idle_basis === "bound_idle_prompt" ? "停在空输入框" : "done"}），排队的 ${p.queued_run_id} ${Math.round(p.waited_ms / 60_000)} 分钟仍未开始，${p.workspace === "clean" ? "工作区干净" : "没有工作区"}。系统已受管释放旧会话并确认退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
         : p.trigger === "host_ops" && p.tool === "host_ops_stop_assignment"
           ? `主机运维 ${p.requested_by} 请求停止空闲会话：${a.id}（${a.machine_id}）上一轮已结束、会话空闲，已关闭终端并确认会话退出${runsNote}；保留身份、工作区和分支，排队的工作在新会话中派发。`
           : p.trigger === "retirement_withdrawn"
@@ -527,7 +537,7 @@ export function releaseUnresponsiveSession(
               queued_run_id: p.queued_run_id,
               waited_ms: p.waited_ms,
               workspace: p.workspace,
-              idle_basis: "terminal_status",
+              idle_basis: p.idle_basis ?? "terminal_status",
             }
           : {}),
         ...(p.trigger === "retirement_withdrawn"

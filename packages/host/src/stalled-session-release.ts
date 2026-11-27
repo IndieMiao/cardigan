@@ -10,6 +10,7 @@ import {
   hasRunTarget,
   type Notification,
   type ProjectId,
+  type PromptObservation,
   type Run,
   type Runtime,
   type RuntimeObservation,
@@ -18,6 +19,7 @@ import {
   runsOf,
   sessionTurnEnded,
   systemEndedTurn,
+  type TurnDoneIdleBasis,
   type UnresponsiveRelease,
   unresponsiveReleaseBlocker,
   untouchedStallSuccessor,
@@ -26,6 +28,7 @@ import { loadCommandState, persistEffect } from "@cardigan/mcp-server";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import { type Store, unfinishedBellAttempts } from "@cardigan/store";
 import { tryHostOpsLock } from "./host-ops-lock.js";
+import { boundIdlePrompt } from "./idle-prompt.js";
 import { revokeRetiredTokens } from "./idle-session-retirement.js";
 import { sessionExitProof, stallWorkspace } from "./stall-evidence.js";
 import { stoppedSessionExited, stoppedSessionLive } from "./stop-run.js";
@@ -128,7 +131,8 @@ const unfinished = (r: Run) =>
  *   turn ended (no Run on it is unfinished except untouched queued ones it
  *   was not launched for), and a never-started queued Run has waited since
  *   both its queueing and the session's last sign of life. The patrol also
- *   requires the CLI to report `done` before releasing.
+ *   requires the CLI to report `done`, or (C-838) to report nothing while
+ *   showing its bound empty editor, before releasing.
  * `ms` of `0` turns the first two triggers off.
  */
 export function stalledSessions(
@@ -285,7 +289,12 @@ function earliest(times: readonly string[]) {
 type Workspace = Awaited<ReturnType<typeof stallWorkspace>>;
 export type StalledSessionDecision =
   | { readonly action: "skip"; readonly reason: string }
-  | { readonly action: "release"; readonly workspace: "clean" | "no_worktree" }
+  | {
+      readonly action: "release";
+      readonly workspace: "clean" | "no_worktree";
+      /** turn_done only: why the ended turn's session counts as idle. */
+      readonly idle_basis?: TurnDoneIdleBasis;
+    }
   | { readonly action: "hand_off"; readonly reason: string };
 
 /**
@@ -298,6 +307,9 @@ export type StalledSessionDecision =
  *   exit is left to the existing paths.
  * - The checkout must be clean (ignored files only) or absent. Anything
  *   else goes to PM with the reason instead.
+ * - C-759/C-838 `turn_done`: the CLI reports `done`, or hc has no activity
+ *   for it (`unknown`) and the bound CLI shows its empty editor
+ *   (`idle_prompt`, Claude Code and Codex never report activity to hc).
  */
 export function stalledSessionDecision(input: {
   readonly trigger?: StalledSession["trigger"];
@@ -305,6 +317,8 @@ export function stalledSessionDecision(input: {
   readonly status: RuntimeObservation | undefined;
   readonly owner: "alive" | "unknown" | "exited" | "unobserved";
   readonly workspace: Workspace;
+  /** C-838: the bound CLI shows its empty editor and idle footer. */
+  readonly idle_prompt?: boolean;
 }): StalledSessionDecision {
   if (input.can_restart)
     return { action: "skip", reason: "turn_recovery_available" };
@@ -313,13 +327,27 @@ export function stalledSessionDecision(input: {
     return { action: "skip", reason: "terminal_not_live" };
   if (!["unknown", "idle", "done"].includes(s.agent))
     return { action: "skip", reason: `terminal_state=${s.agent}` };
-  // C-759: an ended turn is released only on the CLI's own `done`.
-  if (input.trigger === "turn_done" && s.agent !== "done")
+  // C-759: an ended turn is released only on the CLI's own `done`, or
+  // (C-838) on no reported activity while the bound CLI shows its empty
+  // editor.
+  const idle_basis: TurnDoneIdleBasis | undefined =
+    input.trigger !== "turn_done"
+      ? undefined
+      : s.agent === "done"
+        ? "terminal_status"
+        : s.agent === "unknown" && input.idle_prompt === true
+          ? "bound_idle_prompt"
+          : undefined;
+  if (input.trigger === "turn_done" && !idle_basis)
     return { action: "skip", reason: `terminal_state=${s.agent}` };
   if (input.owner !== "alive" && input.owner !== "unknown")
     return { action: "skip", reason: `terminal_owner=${input.owner}` };
   if (input.workspace === "clean" || input.workspace === "no_worktree")
-    return { action: "release", workspace: input.workspace };
+    return {
+      action: "release",
+      workspace: input.workspace,
+      ...(idle_basis ? { idle_basis } : {}),
+    };
   return { action: "hand_off", reason: `workspace=${input.workspace}` };
 }
 
@@ -327,6 +355,7 @@ export function stalledSessionDecision(input: {
 export function stalledSessionRequest(
   s: StalledSession,
   workspace: "clean" | "no_worktree",
+  idle_basis?: TurnDoneIdleBasis,
 ): UnresponsiveRelease {
   if (s.trigger === "turn_done" && s.queued_run_id)
     return {
@@ -334,6 +363,7 @@ export function stalledSessionRequest(
       queued_run_id: s.queued_run_id,
       waited_ms: s.waited_ms,
       workspace,
+      ...(idle_basis && idle_basis !== "terminal_status" ? { idle_basis } : {}),
     };
   return s.trigger === "system_turn" && s.turn
     ? {
@@ -393,6 +423,11 @@ export async function releaseStalledSession(
     readonly signal?: AbortSignal | undefined;
     /** Still the same incident with work waiting (fresh state). */
     readonly stillWaiting: (state: CommandState, a: Assignment) => boolean;
+    /**
+     * C-838 `turn_done`: the session counted as idle on the bound empty
+     * editor (hc reports no activity); it is read again right before closing.
+     */
+    readonly idlePrompt?: PromptObservation | undefined;
     readonly scrubCredentials?:
       | ((
           project: ProjectId,
@@ -448,13 +483,17 @@ export async function releaseStalledSession(
       if ("reason" in checked) return refused(checked.reason);
       if (deps.signal?.aborted) return refused("aborted");
       if (stalled.trigger === "turn_done") {
-        // C-759: the CLI must still report `done` right before closing.
+        // C-759: the CLI must still report `done` right before closing;
+        // C-838: or still report nothing while showing its empty editor.
         const again = await runtime.status(ref).catch(() => undefined);
         if (
           !again?.ok ||
           again.value.process !== "alive" ||
-          again.value.agent !== "done" ||
-          again.value.kept
+          again.value.kept ||
+          !(deps.idlePrompt
+            ? again.value.agent === "unknown" &&
+              (await boundIdlePrompt(runtime, ref, deps.idlePrompt))
+            : again.value.agent === "done")
         )
           return refused("terminal_not_done");
       }
@@ -484,7 +523,11 @@ export async function releaseStalledSession(
           { kind: "system", project_id: project },
           a.id,
           ref,
-          stalledSessionRequest(stalled, workspace),
+          stalledSessionRequest(
+            stalled,
+            workspace,
+            deps.idlePrompt ? "bound_idle_prompt" : "terminal_status",
+          ),
           { ids: tx.ids, clock },
         );
         // A changed owner keeps its reference; the closed terminal then

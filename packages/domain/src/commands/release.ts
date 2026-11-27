@@ -24,6 +24,7 @@ import {
   routeDelegatedWorktreeCleanups,
 } from "./delegation.js";
 import { neverDispatchedQueue } from "./failed-placement.js";
+import { untouchedQueuedRun } from "./idle-session-retirement.js";
 import { cancelRunDispatch } from "./launch.js";
 import { handoffWithoutOps } from "./ops-handoff.js";
 import { WORKTREE_CLEANUP_PLAIN_SUMMARY } from "./plain-summary.js";
@@ -82,18 +83,19 @@ export function releaseAssignment(
       handoffWithoutOps(d, a);
       return a;
     }
+    const open = d
+      .list("runs")
+      .filter(
+        (r) =>
+          r.assignment_id === a.id &&
+          (r.inactivity_stop ||
+            r.dispatch_stop ||
+            !["completed", "failed", "cancelled"].includes(r.status)),
+      );
     ensure(
-      !d
-        .list("runs")
-        .some(
-          (r) =>
-            r.assignment_id === a.id &&
-            (r.inactivity_stop ||
-              r.dispatch_stop ||
-              !["completed", "failed", "cancelled"].includes(r.status)),
-        ),
+      !open.length,
       "illegal_transition",
-      `Assignment ${a.id} 还有未结束的 Run；请先执行 cardigan assignment stop ${a.id}，再释放。`,
+      unfinishedRunsReleaseRefusal(a, open),
     );
     const next = {
       ...a,
@@ -121,6 +123,31 @@ export function releaseAssignment(
     return next;
   });
 }
+/**
+ * C-838: why an Assignment with unfinished Runs cannot be released yet, and
+ * what PM or host operations can do next without a human on the host.
+ */
+export function unfinishedRunsReleaseRefusal(
+  a: Assignment,
+  open: readonly Run[],
+) {
+  const queued = open.filter(untouchedQueuedRun);
+  const busy = open.filter((r) => !queued.includes(r));
+  const list = (runs: readonly Run[]) => runs.map((r) => r.id).join("、");
+  const steps: string[] = [];
+  if (busy.length)
+    steps.push(
+      `${list(busy)} 已开始或正在启动、停止：等它结束后再释放；要提前结束，请主机运维用 host_ops_cancel_run 取消（Agent 仍在工作时会被拒，等这一轮结束）`,
+    );
+  if (queued.length)
+    steps.push(
+      busy.length
+        ? `${list(queued)} 排队未开始：上一轮结束后，请主机运维用 host_ops_cancel_run 取消它们，或用 host_ops_stop_assignment 停掉空闲会话，让排队的工作在新会话中派发`
+        : `${list(queued)} 排队未开始：要保留这些工作，请主机运维用 host_ops_stop_assignment 停掉上一轮已结束的空闲会话（不释放指派，排队的工作在新会话中派发；会话停在空输入框满阈值时停滞巡检也会自动释放）；要放弃它们，请主机运维用 host_ops_cancel_run 逐个取消后再释放`,
+    );
+  return `Assignment ${a.id} 还有未结束的 Run，暂不能释放。下一步：${steps.join("；")}。人也可以在主机执行 cardigan assignment stop ${a.id} 后再释放。`;
+}
+
 /**
  * Only a never-dispatched queue without a session or launch reservation may be
  * cancelled to reselect the machine. C-624: say which condition failed and

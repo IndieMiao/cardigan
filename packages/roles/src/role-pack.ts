@@ -725,7 +725,7 @@ const ROLE_BODIES: Record<
     "- 恢复卡住的会话用 host_ops_restart_assignment；只取消 Run 用 host_ops_cancel_run；偶发合并检查失败可用 host_ops_recheck_merge 重查；常驻 PM 会话过期用 host_ops_restart_standing_pm。先核实目标、原因和当前状态，失败后核对最新记录，不能盲目重试。",
     "- 作者的 GitHub 预检查长时间停在排队或运行中、作者无法重排时，先用 gh 或日志核实远端 run 的真实状态，再用 host_ops_recheck_precheck：action=reinspect 让主机重新接上已绑定的 run 读取结果（不会再派发新 run）；确认无法取得可信结果时用 action=abandon 结束本次预检查，主机会再只读核对一次 GitHub 并把核实到的状态（或未核实）写进结论，作者随后重新 request_check。",
     "- host_ops_cancel_run 对排队中、尚未开始的 Run 直接取消，不关终端，也不影响同一指派仍活着的上一轮会话；已开始的 Run 仍要确认终端退出，Agent 进程仍在运行时会被拒绝。",
-    "- 上一轮已结束、会话空闲（终端活动 done，或 Agent 进程已不在）却挡着排队 Run 或占着名额时，用 host_ops_stop_assignment 停止该会话：效果同人执行 cardigan assignment stop，关闭终端、确认退出，工作区、分支和排队的工作保留，不新排 Run。Run 在跑、正在投递或确认不了空闲时会被拒绝，按返回原因处理，不改用 restart 绕过。",
+    "- 上一轮已结束、会话空闲（终端活动 done；Claude Code、Codex 没有终端活动时停在空输入框；或 Agent 进程已不在）却挡着排队 Run 或占着名额时，用 host_ops_stop_assignment 停止该会话：效果同人执行 cardigan assignment stop，关闭终端、确认退出，工作区、分支和排队的工作保留，不新排 Run。Run 在跑、正在投递或确认不了空闲时会被拒绝，按返回原因处理，不改用 restart 绕过。",
     "- 每次巡检读取 idle_scarce_sessions：上一轮已结束、占着稀缺资源（android.emulator 等）的空闲指派。排队 Run 不再需要时用 host_ops_cancel_run 取消，会话空闲挡着排队 Run 时用 host_ops_stop_assignment 释放，直接处理，不交人；工具拒绝时记录原因再交 PM。系统也会在空闲会话挡住排队 Run 一段时间后自动释放（工作区干净时）。",
     "- 重启前先区分上游 API 线路中断、Agent 卡死和 server 侧问题。仅长时间没有 MCP 调用不证明卡死：Agent 仍在改代码或跑测试时不能重启；模型网关错误与 card MCP 连接错误按来源区分，证据不明时先记录并核实。",
     "- 沿用已批准的上游中断规则：10 分钟内有 3 个及以上使用同一中转线路的会话失活（run_inactive 或派发超时），按上游 API 中断处理，直连线路不混入统计。以诊断的显式配置为准，未配置时沿用这组默认阈值；探测失败同样先按上游中断处理，不能用一次连接成功覆盖多会话失活证据。",
