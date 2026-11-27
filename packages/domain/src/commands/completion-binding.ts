@@ -10,7 +10,9 @@ import { isCompletionVerifier } from "../templates.js";
 import { requireCardDependencies } from "./card-dependencies.js";
 import { attempt, type CommandDraft, ensure } from "./core.js";
 import { checkEmployeeSeparation } from "./employee-assignment.js";
+import { independentReviewRechecks } from "./independent-review-recheck.js";
 import { canonical } from "./review-context.js";
+import { screenshotCheckEnforced } from "./screenshot-check.js";
 import { resolveCardTemplate } from "./templates.js";
 import { workCompleted } from "./workflow.js";
 
@@ -119,6 +121,20 @@ export function completionSources(d: CommandDraft, card: Card) {
       "invariant_violation",
       `必需验证项 ${w.id} 缺少当前审核`,
     );
+  // C-805: the merge gate must accept the independent review it is bound to.
+  const rechecks = independentReviewRechecks(
+    { work_items: d.list("work_items"), deliveries: d.list("deliveries") },
+    card,
+    screenshotCheckEnforced({
+      project_id: d.state.project_id,
+      project_preferences: d.list("project_preferences"),
+    }),
+  );
+  ensure(
+    !rechecks.length,
+    "invariant_violation",
+    `独立复核须对当前版本重新核对：${rechecks.map((r) => r.item.id).join("、")}`,
+  );
   if (
     highRiskProducts(
       {
