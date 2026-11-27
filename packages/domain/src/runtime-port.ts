@@ -45,6 +45,9 @@ export interface PromptObservation extends RetirementIdentity {
   /** Omitted: either bound empty editor. False: positively require a clear
    * editor (not a failed observation). True: positively require a disconnect. */
   readonly require_disconnect?: boolean;
+  /** C-821: positively require a model API outage error right above the
+   * empty editor (5xx, 429, "No available accounts", overloaded). */
+  readonly require_upstream_error?: true;
 }
 /** A clear-screen observation is read-only, never a send condition. */
 export interface PromptBinding extends PromptObservation {

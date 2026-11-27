@@ -327,6 +327,70 @@ test.each(["claude-code", "codex"] as const)(
   },
 );
 
+test.each(["claude-code", "codex"] as const)(
+  "C-821: %s resume requires the model API error right above an empty editor",
+  async (harness) => {
+    const raw = client(),
+      runtime = value(await HerdrRuntime.create({ client: raw }));
+    const binding = {
+      project_id: "fixture",
+      assignment_id: "A-1",
+      harness,
+      require_upstream_error: true as const,
+    };
+    const stuck =
+      harness === "codex"
+        ? "■ stream error: exceeded retry limit, last status: 503 Service Unavailable\n›\n? for shortcuts"
+        : "● 读取卡片\n⎿  API Error: 503 No available accounts · Resend your message to try again\n──────────\n❯\n──────────\n? for shortcuts";
+    let screen = stuck;
+    const send = vi.fn();
+    raw.exec = async (args) => {
+      if (args[0] === "get")
+        return JSON.stringify({
+          address: ref.terminal_ref,
+          state: "live",
+          status: { state: "unknown" },
+          labels: { project: "fixture", assignment: "A-1" },
+          foreground: {
+            pid: 10,
+            name: harness === "codex" ? "codex" : "claude",
+          },
+          created_ms: 1000,
+        });
+      if (args[0] === "read") return screen;
+      if (args[0] === "send") send(args.at(-1));
+      return "{}";
+    };
+    expect(value(await runtime.observe_prompt(ref, binding))).toBe(true);
+    // Disconnects stay with client recovery; it is not an outage.
+    expect(
+      value(
+        await runtime.observe_prompt(ref, {
+          ...binding,
+          require_upstream_error: undefined,
+          require_disconnect: true,
+        } as never),
+      ),
+    ).toBe(false);
+    const poke = () => runtime.wake(ref, "resume", { prompt_binding: binding });
+    screen = stuck.replace(/\n([›❯])/u, "\n$1 draft");
+    expect(value(await poke()).withdrawn).toBe(true);
+    screen = stuck
+      .replace("503 No available accounts", "401 Invalid token")
+      .replace("503 Service Unavailable", "401 Unauthorized");
+    expect(value(await poke()).withdrawn).toBe(true);
+    screen = stuck
+      .split("\n")
+      .filter((l) => !/Error|error/u.test(l))
+      .join("\n");
+    expect(value(await poke()).withdrawn).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    screen = stuck;
+    expect(value(await poke())).toEqual({ sent: true });
+    expect(send).toHaveBeenCalledExactlyOnceWith("resume");
+  },
+);
+
 test.each(["idle", "done"])(
   "kept %s still requires an empty editor before the original bell",
   async (state) => {

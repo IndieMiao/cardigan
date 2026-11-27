@@ -172,6 +172,14 @@ export const launchConfigSchema = z.strictObject({
       recurrence_window_ms: positiveMillis.default(900_000),
     })
     .optional(),
+  /** C-821: model service outages seen on the sessions' own screens. */
+  upstream_outage: z
+    .strictObject({
+      probe_interval_ms: positiveMillis.optional(),
+      remind_after_ms: positiveMillis.optional(),
+      resume_window_ms: positiveMillis.optional(),
+    })
+    .optional(),
 });
 
 export type ProviderDefinition = z.infer<typeof providerSchema>;
