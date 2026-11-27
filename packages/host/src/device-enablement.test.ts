@@ -296,6 +296,24 @@ function legacyPrompt(project: string) {
   return legacy;
 }
 
+/** The owner closes a prompt themselves. */
+function dismiss(project: string, id: HumanAction["id"]) {
+  store.uow.run((tx) =>
+    persistEffect(
+      tx,
+      project,
+      unwrap(
+        cancelHumanAction(
+          loadCommandState(tx, project),
+          { kind: "human", project_id: project },
+          { human_action_id: id, reason: "先不用" },
+          { ids: tx.ids, clock: { now: () => at } },
+        ),
+      ),
+    ),
+  );
+}
+
 test("C-832: a new device prompts only in the machine's first project, whichever project's check saw it", async () => {
   store.createProject({ id: "b" });
   await check("b");
@@ -351,24 +369,44 @@ test("C-832: per-project prompts raised before: answering one closes the others;
   ]);
 });
 
+test("C-832: a prompt a person dismissed after the merge does not come back in another project in the same state", async () => {
+  store.createProject({ id: "b" });
+  await check("a");
+  const legacy = legacyPrompt("b");
+  init = result({ result: "failed", step: "lock_screen" });
+  requestDevice(
+    store,
+    {
+      machine: "local",
+      type: TYPE,
+      id: SERIAL,
+      request: "enable",
+      projects: ["a", "b"],
+    },
+    { now: () => at },
+    { via: "workbench", project_id: "b" },
+  );
+  await check("a");
+  expect(open("b")[0]?.device_enablement?.phase).toBe("failed");
+  expect(open("a")).toEqual([]);
+  dismiss("b", legacy.id);
+  await check("a");
+  await check("b");
+  expect(open("a")).toEqual([]);
+  expect(open("b")).toEqual([]);
+  // A new state asks again, in the machine's first project.
+  request("enable");
+  expect(open("a").map((h) => h.device_enablement?.phase)).toEqual([
+    "initializing",
+  ]);
+  expect(open("b")).toEqual([]);
+});
+
 test("C-832: dismissing one old per-project prompt leaves the other project's prompt", async () => {
   store.createProject({ id: "b" });
   await check("a");
   const legacy = legacyPrompt("b");
-  store.uow.run((tx) =>
-    persistEffect(
-      tx,
-      "b",
-      unwrap(
-        cancelHumanAction(
-          loadCommandState(tx, "b"),
-          { kind: "human", project_id: "b" },
-          { human_action_id: legacy.id, reason: "先不用" },
-          { ids: tx.ids, clock: { now: () => at } },
-        ),
-      ),
-    ),
-  );
+  dismiss("b", legacy.id);
   await check("a");
   await check("b");
   expect(open("a")).toHaveLength(1);

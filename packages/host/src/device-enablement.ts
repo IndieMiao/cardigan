@@ -208,35 +208,32 @@ function reconcile(
   );
 }
 
-/** Projects (of `projects`) with an open enable prompt for this device. */
-function askingProjects(
-  store: Store,
-  projects: readonly string[],
-  reg: DeviceRegistration,
-) {
+/** Every project's enable prompts for this device, in project creation order. */
+function devicePrompts(store: Store, reg: DeviceRegistration) {
   return store.uow.read((tx) =>
-    projects.filter((p) =>
-      tx.human_actions
-        .list(p)
-        .some(
+    store.listProjects().map((p) => ({
+      project: p.id,
+      prompts: tx.human_actions
+        .list(p.id)
+        .filter(
           (h) =>
-            h.status === "open" &&
             h.requested_by === "system" &&
             !h.card_id &&
             h.device_enablement?.machine_id === reg.machine &&
             h.device_enablement.type === reg.type &&
             h.device_enablement.device_id === reg.id,
         ),
-    ),
+    })),
   );
 }
 
 /**
  * C-832: one enable prompt per device. A new one is raised only in the
  * machine's first project in creation order (the one the Workbench opens
- * first) and only while no project asks yet; prompts raised per project
- * before keep following the device. Once a person answered, one prompt
- * remains: the one in `prefer` (where they answered), else the first.
+ * first), only while no project asks yet and not when a person dismissed
+ * the same prompt in another project; prompts raised per project before
+ * keep following the device. Once a person answered, one prompt remains:
+ * the one in `prefer` (where they answered), else the first.
  */
 function promptPlan(
   store: Store,
@@ -244,17 +241,32 @@ function promptPlan(
   projects: readonly string[],
   reg: DeviceRegistration,
   prefer: string | undefined,
+  shown: unknown,
 ): "open" | "skip" | { readonly merged_into: string } {
-  const asking = askingProjects(store, projects, reg);
-  const first = (among: readonly string[]) =>
-    store
-      .listProjects()
-      .map((p) => p.id)
-      .find((p) => among.includes(p));
-  if (!asking.includes(project))
-    return !asking.length && project === first(projects) ? "open" : "skip";
+  const all = devicePrompts(store, reg);
+  const asking = all
+    .filter(
+      (e) =>
+        projects.includes(e.project) &&
+        e.prompts.some((h) => h.status === "open"),
+    )
+    .map((e) => e.project);
+  if (!asking.includes(project)) {
+    const home = all.find((e) => projects.includes(e.project))?.project;
+    const dismissed = all.some(
+      (e) =>
+        e.project !== project &&
+        e.prompts.some(
+          (h) =>
+            h.status === "cancelled" &&
+            h.cancellation?.source !== "device_rechecked" &&
+            JSON.stringify(h.device_enablement) === JSON.stringify(shown),
+        ),
+    );
+    return !asking.length && project === home && !dismissed ? "open" : "skip";
+  }
   if (reg.status === "pending" || asking.length < 2) return "open";
-  const keep = prefer && asking.includes(prefer) ? prefer : first(asking);
+  const keep = prefer && asking.includes(prefer) ? prefer : asking[0];
   return !keep || project === keep ? "open" : { merged_into: keep };
 }
 
@@ -288,12 +300,17 @@ export function syncDeviceActions(
     const key = (kind: "enable" | "unavailable") =>
       deviceActionKey(kind, machine, reg.type, reg.id);
     if (["pending", "initializing", "failed"].includes(reg.status)) {
-      const plan = promptPlan(store, project, projects, reg, prefer);
+      const prompt = enablePrompt(reg, projects);
+      const plan = promptPlan(
+        store,
+        project,
+        projects,
+        reg,
+        prefer,
+        prompt.device_enablement,
+      );
       if (plan === "open")
-        reconcile(store, project, clock, {
-          key: key("enable"),
-          open: enablePrompt(reg, projects),
-        });
+        reconcile(store, project, clock, { key: key("enable"), open: prompt });
       else if (plan !== "skip")
         reconcile(store, project, clock, {
           key: key("enable"),

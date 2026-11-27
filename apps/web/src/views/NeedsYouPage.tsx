@@ -1707,6 +1707,12 @@ function HumanAction({
       )}
       {item.device_enablement ? (
         <DeviceEnablementControls
+          // A changed prompt (phase, choices) starts from what it now shows.
+          key={JSON.stringify([
+            item.device_enablement.phase,
+            item.device_enablement.projects,
+            item.device_enablement.chosen,
+          ])}
           client={client}
           projectId={projectId}
           id={item.id}
@@ -1816,11 +1822,11 @@ function DeviceEnablementControls({
   prompt: NonNullable<NeedsAction["device_enablement"]>;
   done: () => void;
 }) {
-  const [projects, setProjects] = useState<readonly string[]>(
-    () =>
-      prompt.chosen?.filter((p) => prompt.projects.includes(p)) ??
-      (prompt.preselected ? [prompt.preselected] : []),
-  );
+  const [projects, setProjects] = useState<readonly string[]>(() => {
+    const before = prompt.chosen?.filter((p) => prompt.projects.includes(p));
+    if (before?.length) return before;
+    return prompt.preselected ? [prompt.preselected] : [];
+  });
   const action = useAction(done);
   const initializing = prompt.phase === "initializing";
   const send = (
