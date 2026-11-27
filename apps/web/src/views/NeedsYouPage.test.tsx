@@ -457,9 +457,11 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
   );
   const card = await screen.findByRole("article", { name: "拍板 Q-1" });
   const list = within(card).getByRole("list", { name: "拍板附件" });
+  // C-820: images first, then other files, each one shared attachment tile.
   const items = within(list).getAllByRole("listitem");
-  expect(items.map((li) => li.textContent)).toEqual(["▤ spec.pdf", ""]);
-  const link = within(list).getByRole("link", { name: "▤ spec.pdf" });
+  expect(items.map((li) => li.dataset.attachmentId)).toEqual(["F-1", "F-2"]);
+  expect(items[1]?.textContent).toContain("PDF");
+  const link = within(list).getByRole("link", { name: "下载 spec.pdf" });
   expect(link.getAttribute("href")).toBe("/api/projects/p-1/attachments/F-2");
   expect(link.hasAttribute("download")).toBe(true);
   const thumb = within(list).getByRole("button", { name: "预览 before.png" });

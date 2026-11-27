@@ -42,27 +42,7 @@
     font-size: var(--ui-text-base);
     line-height: var(--ui-leading);
   }
-  /*
-   * Narrow screens: three thumbnails a row at the same 160:104 shape, so the
-   * criteria and options stay close; files and “还有 N 个” take a whole row.
-   */
-  @media (max-width: 760px) {
-    .brief > :global(.decision-attachments) {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .brief
-      > :global(.decision-attachments)
-      > li:not(:has(:global(.attachment-preview))) {
-      grid-column: 1 / -1;
-    }
-    .brief :global(.decision-attachments .attachment-preview) {
-      width: 100%;
-      height: auto;
-      aspect-ratio: 160 / 104;
-    }
-  }
-  /* Fills its list item so it centres beside the thumbnails. */
+  /* “还有 N 个” after the attachment tiles (C-820), on a row of its own. */
   .more {
     display: inline-flex;
     align-items: center;

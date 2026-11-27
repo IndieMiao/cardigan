@@ -62,6 +62,7 @@ export function DecisionBrief({
       )}
       <DecisionAttachments
         attachments={decision.attachments}
+        flow={false}
         more={
           omitted > 0 &&
           (cardId ? (

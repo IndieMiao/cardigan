@@ -261,7 +261,9 @@ test("attachment names and notes appear in comments and upload rows as plain tex
     ],
     [named, document, legacy],
   );
-  const attached = view.container.querySelector(".attachments") as HTMLElement;
+  const attached = view.container
+    .querySelector("[data-ui=attachment-tile]")
+    ?.closest("ul") as HTMLElement;
   expect(within(attached).getByText("截图.png")).toBeTruthy();
   expect(
     within(attached).getByText("<script>plain text</script>"),
@@ -432,7 +434,7 @@ test("C-95: an open decision shows referenced attachments in the card timeline; 
   expect(within(list).getByRole("button", { name: "预览 a.png" })).toBeTruthy();
   expect(
     within(list)
-      .getByRole("link", { name: "▤ notes.txt" })
+      .getByRole("link", { name: "下载 notes.txt" })
       .getAttribute("href"),
   ).toBe("/api/projects/p-1/attachments/F-2");
   view.rerender(content(plain.id));

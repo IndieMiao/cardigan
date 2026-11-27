@@ -15,9 +15,10 @@ import { renderMarkdown } from "../markdown.js";
 import { linkableReferences, linkifyReferences } from "../refs.js";
 import { statusLabel } from "../status.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
+import { AttachmentList, splitSuperseded } from "./AttachmentGrid.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { AttachmentRefBody } from "./AttachmentRefBody.js";
-import { EmptyState, LongContent, StatusTag, Time } from "./Foundation.js";
+import { EmptyState, LongContent, Time } from "./Foundation.js";
 import { mergeBlockerMessage } from "./MergeBlockers.js";
 import { MergeCheck } from "./MergeCheck.js";
 import { TimelineContent } from "./TimelineContent.js";
@@ -74,22 +75,6 @@ export function authorLabel(author: string): string {
   return author.startsWith("assignment:")
     ? author.slice("assignment:".length)
     : author;
-}
-
-/** Split current attachments from the ones a newer upload replaced. */
-export function splitSuperseded(attachments: readonly AttachmentView[]): {
-  readonly current: readonly AttachmentView[];
-  readonly superseded: readonly AttachmentView[];
-} {
-  const replaced = new Set(
-    attachments.flatMap((attachment) =>
-      attachment.supersedes === null ? [] : [attachment.supersedes],
-    ),
-  );
-  return {
-    current: attachments.filter((attachment) => !replaced.has(attachment.id)),
-    superseded: attachments.filter((attachment) => replaced.has(attachment.id)),
-  };
 }
 
 export interface TimelineProps {
@@ -299,20 +284,12 @@ export function Timeline({
           </>
         )}
         {!!current.length && (
-          <ul className="attachments">
-            {current.map((attachment) => (
-              <AttachmentItem key={attachment.id} attachment={attachment} />
-            ))}
-          </ul>
+          <AttachmentList attachments={current} basis="always" flow />
         )}
         {!!superseded.length && (
           <details className="superseded">
             <summary>已取代的附件（{superseded.length}）</summary>
-            <ul className="attachments">
-              {superseded.map((attachment) => (
-                <AttachmentItem key={attachment.id} attachment={attachment} />
-              ))}
-            </ul>
+            <AttachmentList attachments={superseded} basis="always" flow />
           </details>
         )}
       </li>
@@ -378,7 +355,11 @@ export function Timeline({
                     {uploaded.map((a) => (
                       <span className="attachment-caption" key={a.id}>
                         {isBitmap(a) ? (
-                          <AttachmentPreview attachment={a} images={images} />
+                          <AttachmentPreview
+                            attachment={a}
+                            images={images}
+                            compact
+                          />
                         ) : isVideo(a) ? (
                           <VideoPreview attachment={a} compact />
                         ) : (
@@ -422,45 +403,5 @@ export function timelineAttachmentRefs(
       a.id,
       attachmentTarget(a, cardId),
     ]),
-  );
-}
-
-/**
- * An attachment: a bitmap may render inline, everything else is a download
- * (§3.2). The caption carries the decision it rests on, so a screenshot without
- * an approved basis is visible as such.
- */
-function AttachmentItem({
-  attachment,
-}: {
-  readonly attachment: AttachmentView;
-}) {
-  return (
-    <li className="attachment">
-      {isBitmap(attachment) ? (
-        <AttachmentPreview attachment={attachment} images={[attachment]} />
-      ) : isVideo(attachment) ? (
-        <VideoPreview attachment={attachment} />
-      ) : (
-        <a
-          className="attachment-download"
-          href={attachment.download_path}
-          rel="noopener noreferrer"
-        >
-          下载 {attachmentName(attachment)}（{attachment.mime}）
-        </a>
-      )}
-      <AttachmentCaption attachment={attachment} />
-      <span className="attachment-basis">
-        {attachment.basis === null ? (
-          "无拍板依据"
-        ) : (
-          <>
-            依据 {attachment.basis.id}（
-            <StatusTag status={attachment.basis.status} />）
-          </>
-        )}
-      </span>
-    </li>
   );
 }

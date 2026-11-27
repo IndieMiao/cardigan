@@ -56,6 +56,9 @@
     --ui-graph-node-compact: 144px;
     --ui-avatar-size: 32px;
     --ui-avatar-compact: 24px;
+    /* C-820: an attachment tile's narrowest width and its thumbnail height. */
+    --ui-attachment-tile: 176px;
+    --ui-attachment-thumb: 112px;
     /* C-531: running ring, isolation line and one clockwise orbit. */
     --ui-run-ring: 2px;
     --ui-run-keyline: 1px;
