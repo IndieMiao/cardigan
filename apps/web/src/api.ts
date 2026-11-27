@@ -1022,6 +1022,8 @@ export interface NeedsAction
     readonly at: string;
   };
   readonly helper_checks?: import("@cardigan/domain").HumanAction["helper_checks"];
+  /** C-817: a discovered device waits for a person to enable it. */
+  readonly device_enablement?: import("@cardigan/domain").DeviceEnablementPrompt;
   readonly card_id: string | null;
   readonly why: string;
   readonly triage?: "pm_ops" | "human" | "host";
@@ -2847,6 +2849,16 @@ export interface CardiganClient {
     reservationId: string,
     reason: string,
   ): Promise<{ reservation_id: string; released_runs: number }>;
+  /** C-817: enable, disable or assign an external device; owner's human session only. */
+  requestMachineDevice?(
+    projectId: string,
+    machineId: string,
+    type: string,
+    deviceId: string,
+    body:
+      | { request: "enable" | "assign"; projects?: readonly string[] }
+      | { request: "disable" },
+  ): Promise<{ device: { status: string } }>;
   createWorkerWizard?(
     projectId: string,
     input: WorkerWizardInput,
@@ -3577,6 +3589,22 @@ export class HttpCardiganClient implements CardiganClient {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/${drain ? "drain" : "resume"}`,
       { method: "POST", body: "{}", idempotencyKey, resend: false },
+    );
+  }
+  /** C-817: enable, disable or assign an external device (owner session only). */
+  requestMachineDevice(
+    projectId: string,
+    machineId: string,
+    type: string,
+    deviceId: string,
+    body:
+      | { request: "enable" | "assign"; projects?: readonly string[] }
+      | { request: "disable" },
+  ): Promise<{ device: { status: string } }> {
+    // Not resent: a late duplicate could undo a later opposite action.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/machines/${encodeURIComponent(machineId)}/devices/${encodeURIComponent(type)}/${encodeURIComponent(deviceId)}`,
+      { method: "POST", body: JSON.stringify(body), resend: false },
     );
   }
   cancelMachineReservation(

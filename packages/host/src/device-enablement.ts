@@ -82,7 +82,9 @@ export async function observeProviderDevices(input: {
         outcome = { ...outcome, version: seen.version };
     } else
       outcome = normalizeDeviceInitResult(
-        { result: seen?.state === "unauthorized" ? "unauthorized" : "not_found" },
+        {
+          result: seen?.state === "unauthorized" ? "unauthorized" : "not_found",
+        },
         [],
       );
     if (registry.finishInit(machine, reg.type, reg.id, claim, outcome, now()))
@@ -107,9 +109,10 @@ function enablePrompt(reg: DeviceRegistration, projects: readonly string[]) {
       : reg.status === "failed"
         ? "failed"
         : "pending";
+  const name = `${provider?.label ?? reg.type}${reg.model ? ` ${reg.model}` : ""}`;
   const lines = [
-    `${reg.machine} 发现${label(reg)}，给 ${preselected ?? "哪个项目"} 用？`,
     `启用后系统自动${steps.length ? `${steps.join("、")}，并` : ""}记录分辨率和系统版本；不恢复出厂，不装卸其它应用。`,
+    `设备编号：${reg.id}`,
     ...(phase === "initializing" ? ["正在初始化，一分钟内出结果。"] : []),
     ...(phase === "failed" && reg.failure
       ? [`上次初始化失败：${reg.failure}`]
@@ -117,7 +120,8 @@ function enablePrompt(reg: DeviceRegistration, projects: readonly string[]) {
   ];
   return {
     instructions: lines.join("\n"),
-    why_human: "设备给哪个项目用要由人确认；Agent 不能代人启用设备。",
+    // The row title: the question itself.
+    why_human: `${reg.machine} 发现${name}，给 ${preselected ?? "哪个项目"} 用？`,
     expected_return: "点“启用”后系统自动初始化，成功后这条待办自动结项。",
     device_enablement: {
       machine_id: reg.machine,
@@ -208,9 +212,7 @@ export function syncDeviceActions(
     clock.now(),
   ).health;
   const listing =
-    health?.available && health.devices
-      ? health.devices
-      : undefined;
+    health?.available && health.devices ? health.devices : undefined;
   for (const reg of regs) {
     if (!DEVICE_PROVIDERS.some((p) => p.type === reg.type)) continue;
     const key = (kind: "enable" | "unavailable") =>
@@ -248,7 +250,7 @@ export function syncDeviceActions(
         key: key("unavailable"),
         open: {
           instructions: `${machine} 上的${label(reg)}${reason}，${cards.join("、")} 的工作在等它。重新接好、在设备上重新允许调试后，系统下次检查机器时自动恢复并结项。`,
-          why_human: "设备要有人到机器旁重新接好或授权，Agent 不能处理。",
+          why_human: `${machine} 的${deviceProvider(reg.type)?.label ?? reg.type}${reason}，有工作在等它`,
           expected_return: "设备恢复后系统自动结项，无需回填。",
           reopen_key: `${reason}:${cards.join(",")}`,
         },

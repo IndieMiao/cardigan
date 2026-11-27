@@ -107,19 +107,17 @@ export class DeviceRegistry {
 
   list(machine?: string): DeviceRegistration[] {
     if (!hasTable(this.store)) return [];
-    const rows = (
-      machine === undefined
-        ? this.store.database
-            .prepare(
-              "SELECT * FROM machine_devices ORDER BY machine, type, device",
-            )
-            .all()
-        : this.store.database
-            .prepare(
-              "SELECT * FROM machine_devices WHERE machine=? ORDER BY type, device",
-            )
-            .all(machine)
-    ) as unknown as Row[];
+    const rows = (machine === undefined
+      ? this.store.database
+          .prepare(
+            "SELECT * FROM machine_devices ORDER BY machine, type, device",
+          )
+          .all()
+      : this.store.database
+          .prepare(
+            "SELECT * FROM machine_devices WHERE machine=? ORDER BY type, device",
+          )
+          .all(machine)) as unknown as Row[];
     return rows.map(registration);
   }
 
@@ -142,7 +140,9 @@ export class DeviceRegistry {
         "INSERT OR IGNORE INTO machine_devices (machine,type,device,status,projects,model,discovered_at,updated_at) VALUES (?,?,?,'pending','[]',?,?,?)",
       )
       .run(machine, device.type, device.id, device.model ?? null, now, now);
-    return inserted.changes ? this.get(machine, device.type, device.id) : undefined;
+    return inserted.changes
+      ? this.get(machine, device.type, device.id)
+      : undefined;
   }
 
   /**
@@ -226,7 +226,9 @@ export class DeviceRegistry {
     now: string,
   ) {
     if (!hasTable(this.store)) return undefined;
-    const stale = new Date(Date.parse(now) - DEVICE_INIT_CLAIM_MS).toISOString();
+    const stale = new Date(
+      Date.parse(now) - DEVICE_INIT_CLAIM_MS,
+    ).toISOString();
     const claimed = this.store.database
       .prepare(
         "UPDATE machine_devices SET init_started_at=? WHERE machine=? AND type=? AND device=? AND status='initializing' AND init_project=? AND (init_started_at IS NULL OR init_started_at<?)",
@@ -271,7 +273,9 @@ export class DeviceRegistry {
 
   /** Devices whose initialization this project's checks run, not yet claimed (or stale). */
   dueInits(now: string) {
-    const stale = new Date(Date.parse(now) - DEVICE_INIT_CLAIM_MS).toISOString();
+    const stale = new Date(
+      Date.parse(now) - DEVICE_INIT_CLAIM_MS,
+    ).toISOString();
     return this.list().filter(
       (d) =>
         d.status === "initializing" &&

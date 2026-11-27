@@ -316,7 +316,10 @@ export const androidDeviceProvider: HostDeviceProvider = {
   ],
   init_steps: ANDROID_DEVICE_INIT_STEPS,
   async initialize({ execution, os, probe, signal }, device) {
-    if (device.type !== ANDROID_DEVICE_TYPE || !DEVICE_ID_PATTERN.test(device.id))
+    if (
+      device.type !== ANDROID_DEVICE_TYPE ||
+      !DEVICE_ID_PATTERN.test(device.id)
+    )
       return undefined;
     const result = await probe(
       execution,

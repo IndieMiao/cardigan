@@ -5,6 +5,7 @@ import {
   DeviceRegistry,
   MachineCheckJournal,
   observationFingerprint,
+  syncDeviceActions,
   upgradeKey,
 } from "@cardigan/host";
 import {
@@ -1207,6 +1208,9 @@ test("C-817: only the owner's login session enables, disables or assigns a devic
       },
       new Date(f.now()).toISOString(),
     );
+    syncDeviceActions(store, project, "local", {
+      now: () => new Date(f.now()).toISOString(),
+    });
     const list = f.projectPath("/machines/local/devices");
     const device = `${list}/android.device/${SERIAL}`;
     const headers = { authorization: `Bearer ${f.token(f.primary.owner)}` };
@@ -1231,6 +1235,20 @@ test("C-817: only the owner's login session enables, disables or assigns a devic
         })
       ).status,
     ).toBe(403);
+    // The Needs You prompt carries what the one-click control needs.
+    const needs = (await f.call(f.projectPath("/needs-you"))).json as {
+      human_actions: { device_enablement?: unknown }[];
+    };
+    expect(
+      needs.human_actions.find((h) => h.device_enablement)?.device_enablement,
+    ).toMatchObject({
+      machine_id: "local",
+      type: "android.device",
+      device_id: SERIAL,
+      projects: [project],
+      preselected: project,
+      phase: "pending",
+    });
     expect((await f.call(list)).json).toMatchObject({
       devices: [
         {
@@ -1248,9 +1266,7 @@ test("C-817: only the owner's login session enables, disables or assigns a devic
       { request: "disable", projects: [project] },
       { request: "assign" },
     ])
-      expect((await f.call(device, { method: "POST", body })).status).toBe(
-        400,
-      );
+      expect((await f.call(device, { method: "POST", body })).status).toBe(400);
     expect(
       (
         await f.call(`${list}/android.device/NOPE`, {

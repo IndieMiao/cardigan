@@ -14,9 +14,9 @@
  * No IO here (§20.2).
  */
 import {
+  DEVICE_ID_PATTERN,
   type DeviceInitStep,
   type DeviceObservation,
-  DEVICE_ID_PATTERN,
   deviceMatches,
   isDeviceKey,
   isDeviceType,

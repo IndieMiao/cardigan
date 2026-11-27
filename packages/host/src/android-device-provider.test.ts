@@ -223,10 +223,7 @@ async function runInit(env: Record<string, string>) {
     const output = await new Promise<string>((resolve, reject) => {
       const child = spawn(
         "python3",
-        [
-          ...ANDROID_DEVICE_INIT_COMMAND.slice(1),
-          "WGC6R21609003324",
-        ],
+        [...ANDROID_DEVICE_INIT_COMMAND.slice(1), "WGC6R21609003324"],
         {
           env: {
             PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
@@ -257,9 +254,9 @@ async function runInit(env: Record<string, string>) {
 
 test("C-817: the real initialization changes only the three declared settings on the given device and stops its server", async () => {
   const ok = await runInit({});
-  expect(normalizeDeviceInitResult(ok.result, ANDROID_DEVICE_INIT_STEPS)).toEqual(
-    { ok: true, resolution: "1600x2560", version: "12" },
-  );
+  expect(
+    normalizeDeviceInitResult(ok.result, ANDROID_DEVICE_INIT_STEPS),
+  ).toEqual({ ok: true, resolution: "1600x2560", version: "12" });
   const commands = ok.log.filter((l) => l.startsWith("shell:"));
   expect(commands).toEqual([
     "shell:settings put global stay_on_while_plugged_in 7;settings get global stay_on_while_plugged_in",

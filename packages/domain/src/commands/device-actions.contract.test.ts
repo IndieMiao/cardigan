@@ -1,7 +1,11 @@
 import { expect, test } from "vitest";
 import type { DeviceEnablementPrompt } from "../entities.js";
 import { cancelHumanAction, deviceActionKey } from "../index.js";
-import { type DeviceActionOpen, reconcileDeviceAction } from "./device-actions.js";
+import {
+  type DeviceActionInput,
+  type DeviceActionOpen,
+  reconcileDeviceAction,
+} from "./device-actions.js";
 import { listNeedsYou } from "./queries.js";
 import { actor, apply, fixture, human, ports, value } from "./test-fixtures.js";
 
@@ -42,7 +46,12 @@ test("C-817: a discovered device opens one owner prompt, updated in place and cl
   let state = fixture();
   const system = { kind: "system" as const, project_id: state.project_id };
   const opened = value(
-    reconcileDeviceAction(state, system, { key: KEY, open: open("pending") }, io),
+    reconcileDeviceAction(
+      state,
+      system,
+      { key: KEY, open: open("pending") },
+      io,
+    ),
   );
   expect(opened.events.map((e) => e.type)).toEqual(["human_action_requested"]);
   state = apply(state, opened);
@@ -62,8 +71,14 @@ test("C-817: a discovered device opens one owner prompt, updated in place and cl
 
   // Same prompt: nothing happens.
   expect(
-    value(reconcileDeviceAction(state, system, { key: KEY, open: open("pending") }, io))
-      .events,
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("pending") },
+        io,
+      ),
+    ).events,
   ).toEqual([]);
 
   // Initialization failed: the same action shows the reason.
@@ -112,7 +127,14 @@ test("C-817: a discovered device opens one owner prompt, updated in place and cl
   // A later prompt for the same key (e.g. re-enable after a reset) is new.
   state = apply(
     state,
-    value(reconcileDeviceAction(state, system, { key: KEY, open: open("pending") }, io)),
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("pending") },
+        io,
+      ),
+    ),
   );
   expect(state.human_actions.map((h) => h.status)).toEqual(["done", "open"]);
 });
@@ -123,17 +145,37 @@ test("C-817: a prompt a person dismissed is not reopened in the same state", () 
   const system = { kind: "system" as const, project_id: state.project_id };
   state = apply(
     state,
-    value(reconcileDeviceAction(state, system, { key: KEY, open: open("pending") }, io)),
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("pending") },
+        io,
+      ),
+    ),
   );
   const id = state.human_actions[0]?.id;
   if (!id) throw new Error("missing action");
   state = apply(
     state,
-    value(cancelHumanAction(state, human, { human_action_id: id, reason: "先不用" }, io)),
+    value(
+      cancelHumanAction(
+        state,
+        human,
+        { human_action_id: id, reason: "先不用" },
+        io,
+      ),
+    ),
   );
   expect(
-    value(reconcileDeviceAction(state, system, { key: KEY, open: open("pending") }, io))
-      .events,
+    value(
+      reconcileDeviceAction(
+        state,
+        system,
+        { key: KEY, open: open("pending") },
+        io,
+      ),
+    ).events,
   ).toEqual([]);
   // A new state (the person enabled it from the CLI and it failed) opens again.
   expect(
@@ -160,7 +202,12 @@ test("C-817: only this project's host system writes device to-dos, with valid in
     { ...system, project_id: "other" },
   ])
     expect(
-      reconcileDeviceAction(state, caller, { key: KEY, open: open("pending") }, io).ok,
+      reconcileDeviceAction(
+        state,
+        caller,
+        { key: KEY, open: open("pending") },
+        io,
+      ).ok,
     ).toBe(false);
   const unavailable = deviceActionKey(
     "unavailable",
@@ -172,11 +219,16 @@ test("C-817: only this project's host system writes device to-dos, with valid in
     { key: "device-enable:mac mini:android.device:X", open: open("pending") },
     { key: "worker-helper:mac-mini:x", open: open("pending") },
     // The enable prompt must carry the prompt; other kinds must not.
-    { key: KEY, open: { ...open("pending"), device_enablement: undefined } },
+    {
+      key: KEY,
+      open: (({ device_enablement: _prompt, ...rest }) => rest)(
+        open("pending"),
+      ),
+    },
     { key: unavailable, open: open("pending") },
     { key: KEY, open: { ...open("pending"), instructions: " " } },
     { key: KEY, close: { outcome: "done" as const, text: "" } },
-  ])
+  ] as DeviceActionInput[])
     expect(reconcileDeviceAction(state, system, bad, io).ok).toBe(false);
   expect(
     reconcileDeviceAction(

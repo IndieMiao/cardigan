@@ -17,11 +17,11 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import type { AdbSlotPolicy } from "./adb-slots.js";
-import { DeviceRegistry } from "./device-registry.js";
 import {
   DEVICE_PROVIDERS,
   type HostDeviceProvider,
 } from "./device-providers.js";
+import { DeviceRegistry } from "./device-registry.js";
 
 /**
  * C-813: exclusive leases on single devices (`<type>:<id>`, capacity 1).

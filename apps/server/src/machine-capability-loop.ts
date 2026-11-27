@@ -212,9 +212,7 @@ export function startMachineCapabilityLoop(options: {
       }),
   });
   return {
-    done: Promise.all([loop.done, followup?.done, devices.done]).then(
-      () => {},
-    ),
+    done: Promise.all([loop.done, followup?.done, devices.done]).then(() => {}),
     stop: async () => {
       controller.abort();
       await Promise.all([loop.stop(), followup?.stop(), devices.stop()]);

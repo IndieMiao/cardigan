@@ -1,10 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  DeviceRegistry,
-  MACHINE_CAPABILITY_INTERVAL_MS,
-} from "@cardigan/host";
+import { DeviceRegistry, MACHINE_CAPABILITY_INTERVAL_MS } from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import {
@@ -179,7 +176,13 @@ test("C-817: a device a person enabled is initialized by its project's check wit
       ["b", "local", { signal: expect.any(AbortSignal) }],
     ]);
     // Claimed by a running check: not checked again until the claim is stale.
-    registry.claimInit("local", "android.device", "S1", "b", new Date().toISOString());
+    registry.claimInit(
+      "local",
+      "android.device",
+      "S1",
+      "b",
+      new Date().toISOString(),
+    );
     refreshMachine.mockClear();
     await vi.advanceTimersByTimeAsync(DEVICE_INIT_FOLLOWUP_MS);
     expect(refreshMachine).not.toHaveBeenCalled();

@@ -47,7 +47,12 @@ beforeEach(() => {
         ok: true,
         output: JSON.stringify({
           devices: [
-            { serial: SERIAL, state: "device", model: "MRR-W39", android: "12" },
+            {
+              serial: SERIAL,
+              state: "device",
+              model: "MRR-W39",
+              android: "12",
+            },
           ],
         }),
       };
@@ -98,7 +103,13 @@ async function run(argv: string[], env: CliIo["env"] = io.env) {
 const last = () => JSON.parse(output.join("\n"));
 async function project(id: string) {
   expect(
-    await run(["project", "create", id, "--code", id.toUpperCase().slice(0, 3)]),
+    await run([
+      "project",
+      "create",
+      id,
+      "--code",
+      id.toUpperCase().slice(0, 3),
+    ]),
   ).toBe(0);
 }
 const humanActions = (p: string) => {
@@ -135,14 +146,30 @@ test("C-817: machine device list / enable / disable / assign, with an immediate 
   // Initialization fails (lock credential set): the reason, exit non-zero.
   lock = "pin";
   expect(
-    await run(["machine", "device", "enable", "local", DEVICE, "--project", "sensen"]),
+    await run([
+      "machine",
+      "device",
+      "enable",
+      "local",
+      DEVICE,
+      "--project",
+      "sensen",
+    ]),
   ).not.toBe(0);
   expect(errors.join("\n")).toContain("初始化失败：“关闭锁屏”没有成功");
   expect(last()).toMatchObject({ status: "failed", projects: ["sensen"] });
   // Retry: the only project of the machine is the default.
   lock = "ok";
   expect(
-    await run(["machine", "device", "enable", "local", DEVICE, "--project", "sensen"]),
+    await run([
+      "machine",
+      "device",
+      "enable",
+      "local",
+      DEVICE,
+      "--project",
+      "sensen",
+    ]),
   ).toBe(0);
   expect(last()).toMatchObject({
     status: "enabled",
@@ -151,7 +178,9 @@ test("C-817: machine device list / enable / disable / assign, with an immediate 
     version: "12",
   });
   expect(humanActions("sensen").map((h) => h.status)).toEqual(["done"]);
-  expect(await run(["machine", "show", "local", "--project", "sensen"])).toBe(0);
+  expect(await run(["machine", "show", "local", "--project", "sensen"])).toBe(
+    0,
+  );
 
   // A second project registers the machine: assign needs explicit projects.
   await project("other");
@@ -188,13 +217,29 @@ test("C-817: machine device list / enable / disable / assign, with an immediate 
   expect(errors.join("\n")).toContain("机器没有登记给项目 nobody");
 
   expect(
-    await run(["machine", "device", "disable", "local", DEVICE, "--project", "sensen"]),
+    await run([
+      "machine",
+      "device",
+      "disable",
+      "local",
+      DEVICE,
+      "--project",
+      "sensen",
+    ]),
   ).toBe(0);
   expect(last()).toMatchObject({ status: "disabled" });
   // Enabled again: initialized before, no new initialization.
   capabilityProbe.mockClear();
   expect(
-    await run(["machine", "device", "enable", "local", DEVICE, "--project", "sensen"]),
+    await run([
+      "machine",
+      "device",
+      "enable",
+      "local",
+      DEVICE,
+      "--project",
+      "sensen",
+    ]),
   ).toBe(0);
   expect(last()).toMatchObject({ status: "enabled" });
   expect(capabilityProbe).not.toHaveBeenCalled();
@@ -232,7 +277,15 @@ test("C-817: machine device commands are human only and validate their arguments
   expect(await run(["machine", "device", "wipe", "local", DEVICE])).not.toBe(0);
   expect(await run(["machine", "device", "enable", "local"])).not.toBe(0);
   expect(
-    await run(["machine", "device", "enable", "local", SERIAL, "--project", "sensen"]),
+    await run([
+      "machine",
+      "device",
+      "enable",
+      "local",
+      SERIAL,
+      "--project",
+      "sensen",
+    ]),
   ).not.toBe(0);
   expect(
     await run([
@@ -247,7 +300,15 @@ test("C-817: machine device commands are human only and validate their arguments
   ).not.toBe(0);
   // Never seen on this machine: nothing to enable.
   expect(
-    await run(["machine", "device", "enable", "local", DEVICE, "--project", "sensen"]),
+    await run([
+      "machine",
+      "device",
+      "enable",
+      "local",
+      DEVICE,
+      "--project",
+      "sensen",
+    ]),
   ).not.toBe(0);
   expect(errors.join("\n")).toContain("机器上没有登记这台设备");
 });

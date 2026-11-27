@@ -17,9 +17,9 @@ import {
 } from "./android-device-provider.js";
 import { requestDevice } from "./device-enablement.js";
 import { DeviceRegistry, DeviceRequestError } from "./device-registry.js";
-import type { CapabilityCommand } from "./machine-capability-probe.js";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import { BUILTIN_MACHINE_CAPABILITIES } from "./machine-capability-catalog.js";
+import type { CapabilityCommand } from "./machine-capability-probe.js";
 
 const SERIAL = "WGC6R21609003324";
 const TYPE = "android.device";
@@ -88,10 +88,7 @@ const open = (project = "a") =>
 const keys = (r: Awaited<ReturnType<typeof check>>) =>
   r.capabilities.map((c) => c.key).filter((k) => k.startsWith(TYPE));
 const registry = () => new DeviceRegistry(store);
-const request = (
-  req: "enable" | "disable" | "assign",
-  projects?: string[],
-) =>
+const request = (req: "enable" | "disable" | "assign", projects?: string[]) =>
   requestDevice(
     store,
     {
@@ -125,8 +122,8 @@ test("C-817: a new device asks once in Needs You, preselecting the only project;
       phase: "pending",
     },
   });
-  expect(prompt?.instructions).toContain("local 发现安卓真机 MRR-W39");
-  expect(prompt?.instructions).toContain("给 a 用？");
+  expect(prompt?.why_human).toBe("local 发现安卓真机 MRR-W39，给 a 用？");
+  expect(prompt?.instructions).toContain(`设备编号：${SERIAL}`);
   expect(prompt?.instructions).toContain("不恢复出厂，不装卸其它应用");
   // Checking again does not ask again or initialize anything.
   await check();
@@ -224,7 +221,7 @@ test("C-817: a shared machine asks without preselecting; the initialization runs
     const [prompt] = open(p);
     expect(prompt?.device_enablement).toMatchObject({ projects: ["a", "b"] });
     expect(prompt?.device_enablement?.preselected).toBeUndefined();
-    expect(prompt?.instructions).toContain("给 哪个项目 用？");
+    expect(prompt?.why_human).toContain("给 哪个项目 用？");
   }
   expect(() => request("enable", ["c"])).toThrow(DeviceRequestError);
   expect(() => request("enable", [])).toThrow(DeviceRequestError);

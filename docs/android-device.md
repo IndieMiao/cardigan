@@ -30,7 +30,24 @@ USB 真机同一时刻只能被一个 adb 服务占用。Cardigan 的做法：
    哪个项目要用这台真机，就在哪个项目的专用账号下授权一次。机器检查以项目账号运行，只把该账号已授权的真机算作这个项目可用的设备。
 3. 不要在机器上留常驻的 adb 服务（例如以前写死的固定端口服务，mac-mini 上 `cg_sensen` 的 5137）：它会一直占着真机。`adb_slots` 的 `legacy_adb_ports` 写了旧端口时，巡检会在没有旧 Run 时关闭它，也可以手动 `adb -P <旧端口> kill-server`。
 
-## 2. 控制主机：名额（主机运维）
+## 2. 在 Needs You 启用（所有者）
+
+机器检查（每 30 分钟一次，也可以在设置页或 CLI 手动检查）看到这台新真机后，Needs You 会出现“<机器> 发现安卓真机 <型号>（<序列号>），给 <项目> 用？”。机器只给一个项目用时已经选好项目，点“启用，给 <项目> 用”即可；给多个项目用时先选项目。
+
+启用后系统在一分钟内自动初始化：插电常亮、关闭动画（三项缩放）、关闭锁屏，并记录分辨率和系统版本。不恢复出厂，不装卸其它应用。成功后这条待办自动结项，真机开始接活；失败时待办里写明原因（例如设备设了锁屏密码，要先在设备上把锁屏方式改为“无”），处理后点“重试”。不想给 Cardigan 用就点“不启用”。
+
+同样的操作也可以在控制主机上用 CLI 完成，CLI 当场执行初始化：
+
+```sh
+cardigan machine device list mac-mini
+cardigan machine device enable mac-mini android.device:WGC6R21609003324 --projects sensen
+cardigan machine device assign mac-mini android.device:WGC6R21609003324 --projects sensen,cardigan
+cardigan machine device disable mac-mini android.device:WGC6R21609003324
+```
+
+停用或改项目不会打断正在用它的 Run，那个 Run 结束后才不再派给它。
+
+## 3. 控制主机：名额（主机运维）
 
 在这台机器的条目里把 `android.device` 加进 `resources` 和 `adb_slots.resources`（示例，不是生产配置）：
 
@@ -49,7 +66,7 @@ machines:
 
 `android.device` 的名额一般等于接入的真机数；名额和模拟器各算各的。配置后重启控制面。
 
-## 3. 检查
+## 4. 检查
 
 ```sh
 cardigan machine check mac-mini --project sensen
@@ -65,9 +82,9 @@ cardigan machine check mac-mini --project sensen
 | `offline` | 连接异常，重插或重启平板 |
 | `unavailable` | 其它情况，例如 Linux 上账号没有 USB 设备权限（udev 规则） |
 
-拔掉后再检查，这台真机从列表里消失，机器也不再有对应能力。可用的真机给机器登记能力 `android.device`、`android.device:<序列号>`、`android.device.model.<型号>`。机器每 30 分钟自动检查一次。`cardigan machine show <机器>` 的 `device_leases` 显示哪个 Run 正持有哪台设备。
+拔掉后再检查，这台真机从列表里消失，机器也不再有对应能力。已启用、给了本项目的可用真机，才给机器登记能力 `android.device`、`android.device:<序列号>`、`android.device.model.<型号>`。机器每 30 分钟自动检查一次。`cardigan machine show <机器>` 的 `device_leases` 显示哪个 Run 正持有哪台设备。
 
-## 4. 工作项怎么要真机
+## 5. 工作项怎么要真机
 
 - 任意一台：`requirements.capabilities` 写 `android.device`。
 - 指定型号：`android.device.model.mrr-w39`；指定某一台：`android.device:WGC6R21609003324`。
@@ -85,6 +102,7 @@ Run 拿到设备时的环境：
 
 ## 排障
 
-- 工作项一直排队，原因“安卓真机：没有空闲的可用设备”：真机被别的 Run 占着、被其它项目预约，或最近一次检查里没有可用的真机。看 `cardigan machine show <机器>` 的 `device_leases` 和 `health.devices`，授权或重插后重新 `machine check`。
-- 原因“安卓真机：本机 adb_slots 未包含 android.device”：按第 2 节补配置。
+- 工作项一直排队，原因“安卓真机：没有空闲的可用设备”：真机还没在 Needs You 启用或没给这个项目，被别的 Run 占着，被其它项目预约，或者最近一次检查里没有可用的真机。用 `cardigan machine device list` 看启用状态。看 `cardigan machine show <机器>` 的 `device_leases` 和 `health.devices`，授权或重插后重新 `machine check`。
+- 原因“安卓真机：本机 adb_slots 未包含 android.device”：按第 3 节补配置。
+- 已启用的真机拔掉、掉授权或离线时，只有排队中的工作在等它，才会在 Needs You 出现提醒。重新接好或授权后，下一次检查会自动结项。
 - 真机在使用中被拔掉：本次 Run 的 adb 会找不到设备；Run 结束后下一次机器检查把它从列表中去掉。

@@ -865,10 +865,7 @@ test("C-813: machine check asks each device provider; devices and their states a
     const probe = vi.fn(
       async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
         if (command === ANDROID_DEVICE_PROBE_COMMAND) return listing;
-        if (
-          Array.isArray(command) &&
-          command[4] === ANDROID_DEVICE_INIT_SCRIPT
-        )
+        if (Array.isArray(command) && command[4] === ANDROID_DEVICE_INIT_SCRIPT)
           return {
             ok: true,
             output: JSON.stringify({
@@ -923,8 +920,9 @@ test("C-813: machine check asks each device provider; devices and their states a
       now: options.now(),
     });
     const first = await refreshMachineObservations(options);
-    expect(registry.get("local", "android.device", "WGC6R21609003324"))
-      .toMatchObject({ status: "enabled", resolution: "1600x2560" });
+    expect(
+      registry.get("local", "android.device", "WGC6R21609003324"),
+    ).toMatchObject({ status: "enabled", resolution: "1600x2560" });
     expect(keys(first)).toEqual([
       "android.device",
       "android.device.model.mrr-w39",

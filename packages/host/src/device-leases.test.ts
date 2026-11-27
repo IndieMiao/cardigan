@@ -355,14 +355,10 @@ test("C-817: only devices a person enabled for the project are handed out; disab
   const registry = new DeviceRegistry(store);
   // Listed but never enabled: not handed out.
   observe([TABLET], "first", at, false);
-  expect((await claim(l, 1, ["android.device"])).blocked).toContain(
-    "安卓真机",
-  );
+  expect((await claim(l, 1, ["android.device"])).blocked).toContain("安卓真机");
   // Enabled for the other project only.
   enable([TABLET], "second");
-  expect((await claim(l, 2, ["android.device"])).blocked).toContain(
-    "安卓真机",
-  );
+  expect((await claim(l, 2, ["android.device"])).blocked).toContain("安卓真机");
   enable([TABLET], "first");
   const holder = await claim(l, 3, ["android.device"]);
   expect(holder.access?.devices?.map((d) => d.id)).toEqual([TABLET.id]);

@@ -65,7 +65,12 @@ test("C-817: only an enabled device assigned to the project is dispatchable to i
   expect(deviceEnabledFor(enabled, "a")).toBe(true);
   expect(deviceEnabledFor(enabled, "b")).toBe(false);
   expect(deviceEnabledFor(undefined, "a")).toBe(false);
-  for (const status of ["pending", "initializing", "failed", "disabled"] as const)
+  for (const status of [
+    "pending",
+    "initializing",
+    "failed",
+    "disabled",
+  ] as const)
     expect(deviceEnabledFor({ ...enabled, status }, "a")).toBe(false);
 });
 
@@ -99,7 +104,10 @@ test("C-817: initialization output is reduced to fixed texts and strict values",
   ).toEqual({ ok: true });
   expect(
     normalizeDeviceInitResult({ result: "failed", step: "lock_screen" }, steps),
-  ).toEqual({ ok: false, reason: "“关闭锁屏”没有成功：先在设备上取消锁屏密码" });
+  ).toEqual({
+    ok: false,
+    reason: "“关闭锁屏”没有成功：先在设备上取消锁屏密码",
+  });
   expect(
     normalizeDeviceInitResult({ result: "failed", step: "stay_awake" }, steps),
   ).toEqual({ ok: false, reason: "“插电常亮”没有成功" });
@@ -114,9 +122,12 @@ test("C-817: initialization output is reduced to fixed texts and strict values",
     expect(outcome.ok).toBe(false);
     expect(JSON.stringify(outcome)).not.toMatch(/script|device said/u);
   }
-  expect(normalizeDeviceInitResult({ result: "not_found" }, steps)).toMatchObject(
-    { ok: false, reason: expect.stringContaining("没有看到这台设备") },
-  );
+  expect(
+    normalizeDeviceInitResult({ result: "not_found" }, steps),
+  ).toMatchObject({
+    ok: false,
+    reason: expect.stringContaining("没有看到这台设备"),
+  });
   expect(
     normalizeDeviceInitResult({ result: "unauthorized" }, steps),
   ).toMatchObject({ ok: false, reason: expect.stringContaining("授权") });

@@ -1,8 +1,8 @@
 import type {
-  DeviceRegistration,
   Assignment,
   CardId,
   CommandState,
+  DeviceRegistration,
   HumanActionId,
   Machine,
   MergeClassificationInput,
@@ -56,14 +56,14 @@ import {
   DeviceRegistry,
   DeviceRequestError,
   effectiveRunLimit,
-  machineProjects,
-  requestDevice,
   findMachineReservation,
   listMachineReservations,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   MachineLeases,
+  machineProjects,
   RuntimeTargets,
+  requestDevice,
   targetProbe,
   withCapacityOverrides,
 } from "@cardigan/host";
@@ -1199,12 +1199,7 @@ async function checkMachineFromCli(
           ?.browsers_path,
     },
     async () => {
-      const connection = await terminalExecution(
-        io,
-        dataDir,
-        null,
-        machineId,
-      );
+      const connection = await terminalExecution(io, dataDir, null, machineId);
       const created = await RuntimeTargets.create({
         ...connection,
         env: io.env,

@@ -478,3 +478,106 @@ test("C-459: system notices without a question are told apart by their first lin
   expect(first.getByText("项目级事项")).toBeTruthy();
   expect(first.getByRole("button", { name: "标为已读 ev-1" })).toBeTruthy();
 });
+
+test("C-817: a discovered device is enabled with one click for the preselected project; shared machines choose; failures retry", async () => {
+  const requestMachineDevice = vi.fn<
+    NonNullable<CardiganClient["requestMachineDevice"]>
+  >(async () => ({ device: { status: "initializing" } }));
+  const completeAction = vi.fn<CardiganClient["completeAction"]>(
+    async () => undefined,
+  );
+  const prompt = {
+    machine_id: "mac-mini",
+    type: "android.device",
+    device_id: "WGC6R21609003324",
+    label: "安卓真机",
+    model: "MRR-W39",
+    steps: ["插电常亮", "关闭动画", "关闭锁屏"],
+  };
+  const action = (
+    id: string,
+    device_enablement: Record<string, unknown>,
+  ): NeedsPage["human_actions"][number] => ({
+    id,
+    card_id: null,
+    why: "设备给哪个项目用要由人确认",
+    instructions:
+      "mac-mini 发现安卓真机 MRR-W39（WGC6R21609003324），给 sensen 用？",
+    expected_return: "点“启用”后系统自动初始化",
+    due: null,
+    waited_ms: 0,
+    blocked_work_items: [],
+    device_enablement: {
+      ...prompt,
+      ...device_enablement,
+    } as NonNullable<NeedsPage["human_actions"][number]["device_enablement"]>,
+  });
+  render(
+    <NeedsYouPage
+      projectId="sensen"
+      client={fakeClient({
+        needsYou: async () => ({
+          ...data,
+          decisions: [],
+          human_actions: [
+            action("H-7", {
+              projects: ["sensen"],
+              preselected: "sensen",
+              phase: "pending",
+            }),
+            action("H-8", { projects: ["a", "b"], phase: "failed" }),
+            action("H-9", {
+              projects: ["sensen"],
+              phase: "initializing",
+              preselected: "sensen",
+            }),
+          ],
+        }),
+        requestMachineDevice,
+        completeAction,
+      })}
+    />,
+  );
+  const panel = await openTab("待你执行");
+  let row = within(await panel.findByRole("article", { name: "执行 H-7" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 H-7" }));
+  // Not a manual to-do: no result field or 确认已完成.
+  expect(row.queryByLabelText("H-7 执行结果")).toBeNull();
+  expect(row.queryByRole("button", { name: "确认已完成" })).toBeNull();
+  fireEvent.click(row.getByRole("button", { name: "启用，给 sensen 用" }));
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(1));
+  expect(requestMachineDevice.mock.calls[0]).toEqual([
+    "sensen",
+    "mac-mini",
+    "android.device",
+    "WGC6R21609003324",
+    { request: "enable", projects: ["sensen"] },
+  ]);
+
+  row = within(await panel.findByRole("article", { name: "执行 H-8" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 H-8" }));
+  const retry = row.getByRole("button", { name: "重试" }) as HTMLButtonElement;
+  expect(retry.disabled).toBe(true);
+  changeControl(row.getByLabelText("H-8 给哪个项目用"), {
+    target: { value: "b" },
+  });
+  fireEvent.click(row.getByRole("button", { name: "重试" }));
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(2));
+  expect(requestMachineDevice.mock.calls[1]?.[4]).toEqual({
+    request: "enable",
+    projects: ["b"],
+  });
+  fireEvent.click(row.getByRole("button", { name: "不启用" }));
+  await waitFor(() => expect(requestMachineDevice).toHaveBeenCalledTimes(3));
+  expect(requestMachineDevice.mock.calls[2]?.[4]).toEqual({
+    request: "disable",
+  });
+
+  row = within(await panel.findByRole("article", { name: "执行 H-9" }));
+  fireEvent.click(row.getByRole("button", { name: "处理 H-9" }));
+  expect(
+    (row.getByRole("button", { name: "初始化中…" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  expect(completeAction).not.toHaveBeenCalled();
+});
