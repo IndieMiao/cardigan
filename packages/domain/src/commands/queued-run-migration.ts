@@ -53,7 +53,6 @@ export function startedAssignment(a: Assignment) {
 
 type Migration = {
   readonly work_item_id?: string;
-  readonly from_machine?: string;
   readonly at?: string;
 };
 
@@ -137,8 +136,9 @@ function duration(ms: number) {
  * bells are handed over by the dispatcher (C-527).
  *
  * The target is chosen by the same `selectMachine` as an assignment, with
- * the original machine, machines this item already left and machines the
- * host did not find admissible excluded; it must have room now.
+ * the original machine and machines the host did not find admissible
+ * excluded; it must have room now. After a migration the work item cools
+ * down before it may move again, to any machine including the one it left.
  */
 export function migrateQueuedRun(
   state: CommandState,
@@ -179,8 +179,6 @@ export function migrateQueuedRun(
     const exclude = new Map<string, string>();
     for (const m of d.list("machines"))
       if (!admissible.has(m.id)) exclude.set(m.id, "主机核对：现在不能开工");
-    for (const m of migrations(d, item.id))
-      if (m.from_machine) exclude.set(m.from_machine, "已从这台迁出，不迁回");
     exclude.set(a.machine_id, "当前排队所在机器");
     const { machine_id, audit } = selectMachine(
       d,

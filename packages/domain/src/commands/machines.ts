@@ -1,5 +1,9 @@
+import { capabilityAlternatives } from "../capability-alternatives.js";
 import type { Actor, Machine, RoleWorktree, WorkItem } from "../entities.js";
-import { remainingResourceRatio } from "../machine-placement.js";
+import {
+  type MachinePlacement,
+  remainingResourceRatio,
+} from "../machine-placement.js";
 import {
   parseCapabilityRequirement,
   type WorkItemRequirements,
@@ -46,6 +50,31 @@ function versionMatches(
       );
   }
   return true;
+}
+
+/**
+ * C-826: required keys another project's exclusive reservation blocks on this
+ * machine now. An alternative (`android.any`) is blocked only when every
+ * option the machine has verified is reserved.
+ */
+function reservedKeys(
+  keys: readonly string[],
+  f: MachinePlacement | undefined,
+) {
+  const reserved = new Set(f?.reserved ?? []);
+  if (!reserved.size) return [];
+  const verified = new Set(
+    f?.capabilities.filter((c) => c.available).map((c) => c.key),
+  );
+  return keys.filter((key) => {
+    const options = capabilityAlternatives(key);
+    if (!options) return reserved.has(key);
+    const usable = options.filter((o) => verified.has(o));
+    return (
+      usable.some((o) => reserved.has(o)) &&
+      usable.every((o) => reserved.has(o))
+    );
+  });
 }
 
 /** Registry admission also applies to explicit assignments; ranking and live evidence never do. */
@@ -219,6 +248,7 @@ export function selectMachine(
       const slot = quota?.resources?.get(key);
       return slot ? [{ key, ...slot }] : [];
     });
+    const reserved = reservedKeys(keys, f);
     const full = f
       ? [
           ...(f.occupied >= f.limit
@@ -233,6 +263,7 @@ export function selectMachine(
           ...project_resources
             .filter((r) => r.occupied >= r.limit)
             .map((r) => `项目 ${r.key} 名额 ${r.occupied}/${r.limit}`),
+          ...reserved.map((key) => `${key} 被其它项目预约独占`),
         ]
       : [];
     candidates.push({
@@ -251,8 +282,10 @@ export function selectMachine(
             quota?.limit ? freeRatio(quota.limit) : 1,
             remainingResourceRatio(keys, f.resources),
             ...project_resources.map(freeRatio),
+            reserved.length ? 0 : 1,
           )
         : null,
+      ...(reserved.length ? { reserved } : {}),
       ...(resources.length ? { resources } : {}),
       ...(project_resources.length ? { project_resources } : {}),
       ...(full.length ? { full } : {}),
@@ -264,6 +297,8 @@ export function selectMachine(
     (a, b) =>
       Number((b.remaining_ratio ?? 0) > 0) -
         Number((a.remaining_ratio ?? 0) > 0) ||
+      // A reserved machine cannot even start the work when it frees up.
+      Number(!!a.reserved) - Number(!!b.reserved) ||
       Number(b.control_host) - Number(a.control_host) ||
       Number(b.affinity) - Number(a.affinity) ||
       (b.remaining_ratio ?? 0) - (a.remaining_ratio ?? 0) ||
@@ -287,6 +322,7 @@ export function selectMachine(
       ...(queued_on ? { queued_on } : {}),
       selection_order: [
         "has_capacity",
+        "not_reserved",
         "control_host",
         "affinity",
         "remaining_ratio",

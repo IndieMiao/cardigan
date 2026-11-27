@@ -5,6 +5,7 @@ import {
   type Store,
 } from "@cardigan/store";
 import { observationFingerprint } from "./machine-capabilities.js";
+import { listMachineReservations } from "./machine-reservations.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
 import type { RunCapacityConfiguration } from "./run-capacity-config.js";
 import { assignmentResourceKeys } from "./run-resources.js";
@@ -197,6 +198,7 @@ export function configureMachinePlacement(
                 resourcesForMachine(id),
                 pendingSlots.get(id),
               ),
+              ...reservedByOthers(store, project, id, now),
               ...projectQuota(id),
             } satisfies MachinePlacement,
           ];
@@ -218,4 +220,21 @@ function withPending(
       { limit: slot.limit, occupied: slot.occupied + (pending.get(key) ?? 0) },
     ]),
   );
+}
+
+/** C-826: resources another project's exclusive calendar reservation holds right now. */
+function reservedByOthers(
+  store: Store,
+  project: string,
+  machine: string,
+  now: string,
+): Pick<MachinePlacement, "reserved"> {
+  const reserved = [
+    ...new Set(
+      listMachineReservations(store.database, { now, machine })
+        .filter((r) => r.holder_project !== project && r.starts_at <= now)
+        .map((r) => r.resource),
+    ),
+  ].sort();
+  return reserved.length ? { reserved } : {};
 }

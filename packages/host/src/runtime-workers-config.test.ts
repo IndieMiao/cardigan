@@ -32,6 +32,7 @@ import {
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import { BUILTIN_MACHINE_CAPABILITIES } from "./machine-capability-catalog.js";
 import { configureMachinePlacement } from "./machine-placement.js";
+import { MachineLeases } from "./resource-leases.js";
 import { loadRunCapacityConfig } from "./run-capacity-config.js";
 import { runtimeTargetBinding } from "./runtime-target-fingerprint.js";
 import { RuntimeTargets } from "./runtime-targets.js";
@@ -828,6 +829,23 @@ test("placement reads current project opt-in and unexpired observations in the c
       pending_assignments: 0,
       resources: godot(0),
     });
+    // C-826#10: another project's exclusive reservation is reported as such.
+    await new MachineLeases(
+      store,
+      await loadRunCapacityConfig({ env }),
+      (() => {
+        throw new Error("unused probe");
+      }) as never,
+    ).reserve(
+      { kind: "human", project_id: "other" },
+      "worker-a",
+      "godot",
+      now,
+      "2026-01-02T00:00:00.000Z",
+      () => now,
+    );
+    expect(read()?.reserved).toEqual(["godot"]);
+    expect(read("other")?.reserved).toBeUndefined();
     expect(read("other")).toMatchObject({
       remote_binding: "disabled",
       health: null,

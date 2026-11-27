@@ -330,7 +330,7 @@ test("a dispatched queue, an explicit or legacy placement and a stopped owner st
   ).toContain("已暂停或已结束");
 });
 
-test("the same work item never moves back and forth between two machines", () => {
+test("the same work item does not move back and forth: it cools down, then any machine may take it", () => {
   const first = state();
   const moved = apply(first, value(migrate(first)));
   const successor = moved.work_items.find((w) => w.id === W1)?.assignment_id;
@@ -338,7 +338,6 @@ test("the same work item never moves back and forth between two machines", () =>
   // The successor now waits on mac-mini while cardigan-ci frees up.
   const waiting: CommandState = {
     ...moved,
-    machines: [...(moved.machines ?? []), host("worker-c")],
     runs: [
       ...moved.runs,
       {
@@ -352,32 +351,104 @@ test("the same work item never moves back and forth between two machines", () =>
       placement([
         ["cardigan-ci", healthy(slots(2, 0))],
         ["mac-mini", healthy(slots(3, 3))],
-        ["worker-c", healthy(slots(1, 0))],
       ]),
   };
-  const again = (s: CommandState, admissible: string[], at: string) =>
+  const again = (at: string) =>
     migrateQueuedRun(
-      s,
+      waiting,
       system,
       {
         run_id: id("run", 2),
-        admissible,
+        admissible: ["cardigan-ci"],
         reason: "godot 名额 3/3 已满",
         queued_at: now,
       },
       { ...io(), clock: { now: () => at } },
     );
-  const later = new Date(
-    Date.parse(now) + DEFAULT_QUEUED_MIGRATION_COOLDOWN_MS,
-  ).toISOString();
-  expect(refusal(again(waiting, ["cardigan-ci"], now))).toBe(
+  const at = (ms: number) => new Date(Date.parse(now) + ms).toISOString();
+  expect(refusal(again(now))).toBe(`${W1} 刚迁移过，冷却中`);
+  expect(refusal(again(at(DEFAULT_QUEUED_MIGRATION_COOLDOWN_MS - 1)))).toBe(
     `${W1} 刚迁移过，冷却中`,
   );
-  // After the cooldown it still never returns to the machine it left.
-  expect(refusal(again(waiting, ["cardigan-ci"], later))).toContain(
-    "已从这台迁出，不迁回",
+  // After the cooldown the machine it left is a candidate again (no dead wait).
+  const back = value(again(at(DEFAULT_QUEUED_MIGRATION_COOLDOWN_MS)));
+  expect(back.data).toMatchObject({
+    machine_id: "cardigan-ci",
+    recovery: { previous_assignment_id: successor },
+  });
+});
+
+test("C-826#10: a resource another project reserved exclusively is not free now", () => {
+  // cardigan-ci's godot is reserved by another project; mac-mini's is busy.
+  const reserved = (s: CommandState): CommandState => ({
+    ...s,
+    read_machine_placement: () =>
+      placement([
+        ["cardigan-ci", { ...healthy(slots(2, 0)), reserved: ["godot"] }],
+        ["mac-mini", healthy(slots(3, 3))],
+      ]),
+  });
+  const queuedOnMini = reserved({
+    ...state(),
+    assignments: state().assignments.map((a) =>
+      a.id === A1 ? { ...a, machine_id: "mac-mini" } : a,
+    ),
+  });
+  expect(refusal(migrate(queuedOnMini, ["cardigan-ci"]))).toBe(
+    "没有现在就能开工的机器",
   );
-  expect(
-    value(again(waiting, ["cardigan-ci", "worker-c"], later)).data.machine_id,
-  ).toBe("worker-c");
+  // Assignment-time selection: the reserved machine is not chosen even
+  // though its slots are free; when all are busy it ranks after a full one.
+  const fresh: CommandState = reserved({
+    ...state(),
+    assignments: state().assignments.filter((a) => a.id !== A1),
+    work_items: state().work_items.map(({ assignment_id: _a, ...w }) => w),
+    runs: [],
+  });
+  const chosen = value(
+    assign(fresh, human, { work_item_id: W1, role_id: "coder" }, io()),
+  );
+  expect(chosen.data.machine_id).toBe("mac-mini");
+  expect(chosen.events.at(-1)?.payload).toMatchObject({
+    candidates: [
+      { machine_id: "mac-mini", remaining_ratio: 0 },
+      {
+        machine_id: "cardigan-ci",
+        remaining_ratio: 0,
+        reserved: ["godot"],
+        full: ["godot 被其它项目预约独占"],
+      },
+    ],
+  });
+  // An alternative is blocked only when every verified option is reserved.
+  const any = (reservedKeys: string[]): CommandState => ({
+    ...fresh,
+    roles: fresh.roles.map((r) =>
+      r.role_id === "coder"
+        ? { ...r, required_capabilities: ["android.any"] }
+        : r,
+    ),
+    read_machine_placement: () => {
+      const android = {
+        ...healthy(slots(2, 0)),
+        capabilities: [
+          { key: "harness.codex", version: "1.2.3", available: true },
+          { key: "android.any", version: null, available: true },
+          { key: "android.emulator", version: null, available: true },
+          { key: "android.device", version: null, available: true },
+        ],
+        resources: new Map(),
+      };
+      return placement([
+        ["cardigan-ci", { ...android, occupied: 0, reserved: reservedKeys }],
+        ["mac-mini", { ...android, occupied: 3 }],
+      ]);
+    },
+  });
+  const pick = (keys: string[]) =>
+    value(
+      assign(any(keys), human, { work_item_id: W1, role_id: "coder" }, io()),
+    ).data.machine_id;
+  expect(pick(["android.emulator"])).toBe("cardigan-ci");
+  expect(pick(["android.emulator", "android.device"])).toBe("mac-mini");
 });
