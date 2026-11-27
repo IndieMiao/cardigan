@@ -604,6 +604,23 @@ def launch_evidence(c, home, row, terminal_why):
     return dict(terminal=facts or None, mcp=mcp, unavailable=why)
 
 
+def launch_terminal(c, home, labels):
+    """C-823: a failed launch whose Run no longer holds the session. hc keeps
+    a finished terminal: find this Run's own one by its launch labels only."""
+    run = c['launch'].get('run')
+    if not isinstance(run, str) or not re.fullmatch(r'R-[1-9][0-9]{0,15}', run):
+        return None, 'run_not_current'
+    own = dict(labels, run=run)
+    own.pop('generation', None)
+    try:
+        rows = terminals(home, c['session'], own, None, c['platform'], True)[0]
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as error:
+        return None, unavailable(error)
+    if not rows:
+        return None, 'terminal_not_registered'
+    return rows[-1], None
+
+
 def terminals(home, session, labels, pinned, system, launch=False):
     with core_rpc(home, session, system) as rpc:
         result, processes = [], []
@@ -789,8 +806,12 @@ def main(c):
     with directory(c['root']) as fd:
         disk = os.fstatvfs(fd)
     rows = hc[0] if hc else None
-    launch = (launch_evidence(c, user.pw_dir, rows[0] if rows else None, why.get('terminals') or ('run_not_current' if not c['live'] else None))
-              if c.get('launch') else None)
+    launch = None
+    if c.get('launch'):
+        launch_row, launch_why = (rows[0] if rows else None), why.get('terminals')
+        if not c['live']:
+            launch_row, launch_why = launch_terminal(c, user.pw_dir, labels)
+        launch = launch_evidence(c, user.pw_dir, launch_row, launch_why)
     for row in rows or []:
         row.pop('launch', None)
     return dict(terminals=rows, processes=processes,

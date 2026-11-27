@@ -206,9 +206,16 @@ export async function inspectWorker(
     terminal: terminal ?? null,
     process: pub?.process ?? null,
     target: target.fingerprint,
+    // C-823: the Run's id lets the collector find its own (possibly
+    // finished) terminal when the Run no longer holds the session.
     launch:
       launch && Number.isFinite(Date.parse(launch.since))
-        ? { since_ms: Date.parse(launch.since) }
+        ? {
+            since_ms: Date.parse(launch.since),
+            ...(run && /^R-[1-9]\d{0,15}$/u.test(run.id)
+              ? { run: run.id }
+              : {}),
+          }
         : null,
     helpers: [
       execution.fileHelper?.path,

@@ -13,6 +13,7 @@ import {
 import { DEFAULT_MCP_BRIDGE_PYTHON } from "../mcp-bridge.js";
 import { readClaudeContext } from "./claude-context.js";
 import { claudeStatusLineSetting, relayHostname } from "./claude-statusline.js";
+import { CLAUDE_TRUST_SCRIPT } from "./claude-trust.js";
 import { plain } from "./effort.js";
 import { onlyKey } from "./provider.js";
 import type { HarnessAdapter } from "./types.js";
@@ -196,6 +197,9 @@ export const claudeCode: HarnessAdapter = {
     };
   },
   localSetup(input, quote) {
+    const python = input.mcp.bridge_python ?? DEFAULT_MCP_BRIDGE_PYTHON;
+    if (!python.startsWith("/") && python !== "python3")
+      throw new Error("Claude trust interpreter must be an absolute path");
     return `# Session state belongs to this Assignment, not to the user's home.
 claude_config_dir=${quote(join(input.run_dir, "claude"))}
 if [ ! -e "$claude_config_dir" ] && [ ! -L "$claude_config_dir" ]; then
@@ -207,15 +211,10 @@ if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$clau
 fi
 # The extra leading zero clears inherited setgid on shared run directories.
 chmod 00700 -- "$claude_config_dir"
-# Claude Code 2.1.318 stores onboarding/trust in .claude.json, but theme and
-# bypass confirmation in settings.json. Seed fresh state as the runtime user;
-# noclobber prevents replacing a file created concurrently (or a symlink).
-if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
-  if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
-    (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ theme: "dark", skipDangerousModePermissionPrompt: true, autoMemoryEnabled: false }))} > "$claude_config_dir/settings.json")
-  fi
-  (umask 077; set -C; printf '%s\\n' ${quote(JSON.stringify({ hasCompletedOnboarding: true, lastOnboardingVersion: "2.1.318", projects: { [input.work_dir]: { hasTrustDialogAccepted: true } } }))} > "$claude_config_dir/.claude.json")
-fi
+# C-823: on every launch (new, resumed or replaced session) trust the exact
+# cwd in the Run's own Claude state, keeping everything else it holds; the
+# first launch also seeds onboarding, theme and bypass confirmation.
+${quote(python)} -IB -c ${quote(CLAUDE_TRUST_SCRIPT)} "$claude_config_dir" ${quote(input.work_dir)}
 `;
   },
 };
