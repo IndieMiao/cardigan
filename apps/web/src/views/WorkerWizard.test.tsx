@@ -1471,6 +1471,8 @@ test("C-707: the device's init report starts the recheck; the passed wizard show
   fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
   fireEvent.click(await dialog.findByRole("button", { name: "确认写入配置" }));
   await dialog.findByRole("button", { name: "开始检查" });
+  // C-839: the device's script does the account and layout itself.
+  expect(dialog.queryByRole("table", { name: "目标机命令" })).toBeNull();
   // The device fetched and ran its script; the server started the recheck.
   fake.mutate((w) => ({
     ...w,
@@ -1506,6 +1508,39 @@ test("C-707: the device's init report starts the recheck; the passed wizard show
   ).toBeTruthy();
   expect(dialog.getByText("未开启")).toBeTruthy();
   expect(fake.writes).not.toContain("enable");
+  expect(dialog.queryByRole("table", { name: "目标机命令" })).toBeNull();
+});
+
+test("C-839: a paired draft shows the target-machine commands only when checks after the device's init stop at a target step", async () => {
+  const fake = pairingBackend(["tools"]);
+  render(
+    <WorkerWizardDrawer
+      client={fakeClient(fake.client)}
+      projectId="p-1"
+      pairing={{ code: "ABCD-EFGH" }}
+      onClose={() => undefined}
+      onChanged={() => undefined}
+      pollMs={5}
+      devicePollMs={5}
+    />,
+  );
+  const dialog = within(await screen.findByRole("dialog"));
+  fireEvent.click(dialog.getByRole("button", { name: "确认接入" }));
+  fireEvent.click(await dialog.findByRole("button", { name: "确认写入配置" }));
+  await dialog.findByRole("button", { name: "开始检查" });
+  expect(dialog.queryByRole("table", { name: "目标机命令" })).toBeNull();
+  // A failed init leaves the device to clean up and pair again.
+  fake.mutate((w) => ({ ...w, device_init: { state: "failed" } }));
+  await dialog.findByText("未完成");
+  expect(dialog.queryByRole("table", { name: "目标机命令" })).toBeNull();
+  fake.mutate((w) => ({
+    ...w,
+    device_init: { state: "succeeded", at: "2026-01-01T00:00:00.000Z" },
+    phase: "running",
+    check_id: "check-device",
+  }));
+  await dialog.findByRole("table", { name: "目标机命令" });
+  dialog.getByText("已完成");
 });
 
 test("C-707: refused codes and limits are explained beside their fields with what to do next", async () => {

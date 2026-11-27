@@ -853,6 +853,56 @@ test.runIf(process.platform === "linux")(
   60_000,
 );
 
+// C-839: Python 3.13 cannot open a terminal as a seekable text "r+" stream;
+// the confirmation must still read a typed "yes" from /dev/tty.
+const TTY_HARNESS = `import importlib.util, json, os, pty, sys
+pid, fd = pty.fork()
+if pid == 0:
+    spec = importlib.util.spec_from_file_location('pair_device', sys.argv[1])
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    answers = [mod.ask('first? '), mod.confirm()]
+    sys.stdout.write('\\nRESULT ' + json.dumps(answers) + '\\n')
+    sys.stdout.flush()
+    os._exit(0)
+out = b''
+def answer(prompt, line):
+    global out
+    while prompt.encode() not in out:
+        out += os.read(fd, 1024)
+    os.write(fd, line.encode())
+answer('first? ', '  Later \\n')
+answer('输入 yes 继续', 'yes\\n')
+while True:
+    try:
+        chunk = os.read(fd, 1024)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out += chunk
+os.waitpid(pid, 0)
+sys.stdout.write(out.decode('utf-8', 'replace'))`;
+
+test.runIf(process.platform === "linux")(
+  "the device script reads the typed answer from its terminal",
+  async () => {
+    const child = spawn("python3", ["-IB", "-c", TTY_HARNESS, SCRIPT], {
+      env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    const code = await new Promise((ok) => child.on("close", ok));
+    expect(code).toBe(0);
+    expect(/RESULT (.+)/u.exec(stdout)?.[1]?.trim()).toBe('["later", true]');
+    expect(stdout).not.toContain("没有可用的终端");
+  },
+  20_000,
+);
+
 test("the pairing script is served as a static file", async () => {
   const f = await m5Cross();
   try {
