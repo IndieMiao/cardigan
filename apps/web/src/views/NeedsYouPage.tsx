@@ -45,6 +45,10 @@ import { IdentityRow } from "../components/IdentityRow.js";
 import { DetailChoiceTag } from "../components/layout/CardDetailLayout.js";
 import { DecisionBriefDetails } from "../components/layout/DecisionBriefLayout.js";
 import {
+  NeedsChoice,
+  NeedsChoices,
+  NeedsFormActions,
+  NeedsFormFeedback,
   NeedsList,
   NeedsListFooter,
   NeedsNotice,
@@ -1599,9 +1603,12 @@ function HumanAction({
         )
       }
     >
-      <IdentityRow className="needs-meta">
-        <EmployeeIdentity {...item} showTitle={false} />
-      </IdentityRow>
+      {/* C-832: a device prompt is the system's own; nobody to show. */}
+      {!item.device_enablement && (
+        <IdentityRow className="needs-meta">
+          <EmployeeIdentity {...item} showTitle={false} />
+        </IdentityRow>
+      )}
       {item.pre_merge_check_reminder && item.card_id && (
         <p
           className="needs-reminder"
@@ -1794,7 +1801,10 @@ function HumanAction({
     </NeedsRow>
   );
 }
-/** C-817: one click enables a discovered device for the chosen project. */
+/**
+ * C-817/C-832: one click enables a discovered device. A machine of several
+ * projects ticks the projects in the one prompt; one project is preselected.
+ */
 function DeviceEnablementControls({
   client,
   projectId,
@@ -1806,7 +1816,11 @@ function DeviceEnablementControls({
   prompt: NonNullable<NeedsAction["device_enablement"]>;
   done: () => void;
 }) {
-  const [project, setProject] = useState(prompt.preselected ?? "");
+  const [projects, setProjects] = useState<readonly string[]>(
+    () =>
+      prompt.chosen?.filter((p) => prompt.projects.includes(p)) ??
+      (prompt.preselected ? [prompt.preselected] : []),
+  );
   const action = useAction(done);
   const initializing = prompt.phase === "initializing";
   const send = (
@@ -1814,7 +1828,7 @@ function DeviceEnablementControls({
       | { request: "enable"; projects: readonly string[] }
       | { request: "disable" },
   ) =>
-    void action.run([projectId, id, body.request, project], async () => {
+    void action.run([projectId, id, body], async () => {
       if (!client.requestMachineDevice) throw new Error("服务端不支持启用设备");
       await client.requestMachineDevice(
         projectId,
@@ -1824,61 +1838,68 @@ function DeviceEnablementControls({
         body,
       );
     });
+  const chosen = prompt.projects.filter((p) => projects.includes(p));
   return (
     <form
       data-needs-focus=""
       aria-label={`${id} 启用设备`}
       onSubmit={(e) => {
         e.preventDefault();
-        if (project) send({ request: "enable", projects: [project] });
+        if (chosen.length) send({ request: "enable", projects: chosen });
       }}
     >
       {prompt.projects.length > 1 && (
-        <label>
-          给哪个项目用
-          <SelectControl
-            required
-            aria-label={`${id} 给哪个项目用`}
-            value={project}
-            onValueChange={setProject}
-            disabled={initializing}
-          >
-            <option value="">请选择</option>
-            {prompt.projects.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </SelectControl>
-        </label>
+        <NeedsChoices legend="给哪些项目用">
+          {prompt.projects.map((p) => (
+            <NeedsChoice
+              key={p}
+              aria-label={`${id} 给 ${p} 用`}
+              checked={projects.includes(p)}
+              disabled={initializing}
+              onCheckedChange={(checked) =>
+                setProjects((current) =>
+                  checked === true
+                    ? [...current.filter((x) => x !== p), p]
+                    : current.filter((x) => x !== p),
+                )
+              }
+            >
+              {p}
+            </NeedsChoice>
+          ))}
+        </NeedsChoices>
       )}
-      <Button
-        type="submit"
-        variant="primary"
-        disabled={action.busy || initializing || !project}
-      >
-        {initializing
-          ? "初始化中…"
-          : prompt.phase === "failed"
-            ? "重试"
-            : prompt.projects.length > 1
-              ? "启用"
-              : `启用，给 ${project} 用`}
-      </Button>
-      <Button
-        variant="secondary"
-        disabled={action.busy}
-        onClick={() => send({ request: "disable" })}
-      >
-        不启用
-      </Button>
-      <RequestFeedback
-        interactive
-        pending={action.busy}
-        pendingMessage="提交中…"
-        error={action.error}
-        message={action.message}
-      />
+      <NeedsFormActions>
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={action.busy || initializing || !chosen.length}
+        >
+          {initializing
+            ? "初始化中…"
+            : prompt.phase === "failed"
+              ? "重试"
+              : prompt.projects.length > 1
+                ? "启用"
+                : `启用，给 ${chosen[0] ?? prompt.projects[0]} 用`}
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={action.busy}
+          onClick={() => send({ request: "disable" })}
+        >
+          不启用
+        </Button>
+      </NeedsFormActions>
+      <NeedsFormFeedback>
+        <RequestFeedback
+          interactive
+          pending={action.busy}
+          pendingMessage="提交中…"
+          error={action.error}
+          message={action.message}
+        />
+      </NeedsFormFeedback>
     </form>
   );
 }

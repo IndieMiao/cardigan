@@ -7,6 +7,7 @@ import {
 } from "react";
 import { cn } from "../../lib/utils.js";
 import { Button, IconButton } from "../ui/button.js";
+import { Checkbox } from "../ui/checkbox.js";
 import { ChevronRightIcon } from "../ui/icons.js";
 import styles from "./NeedsRowLayout.module.css";
 
@@ -160,6 +161,52 @@ export function NeedsRow({
         </div>
       )}
     </article>
+  );
+}
+
+/**
+ * C-832: several values to tick inside a row's details form (e.g. the
+ * projects a device is for); checkboxes sit side by side and wrap.
+ */
+export function NeedsChoices({
+  legend,
+  children,
+}: {
+  legend: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <fieldset className={styles.choices}>
+      <legend>{legend}</legend>
+      <div className={styles.choiceList}>{children}</div>
+    </fieldset>
+  );
+}
+
+/** One checkbox of `NeedsChoices` with its name. */
+export function NeedsChoice({
+  children,
+  ...props
+}: ComponentProps<typeof Checkbox> & { children: ReactNode }) {
+  return (
+    <label className={styles.choice}>
+      <Checkbox {...props} />
+      {children}
+    </label>
+  );
+}
+
+/** A details form's buttons in one row at their own width. */
+export function NeedsFormActions({ children }: { children: ReactNode }) {
+  return <div className={styles.formActions}>{children}</div>;
+}
+
+/** Keeps a details form's RequestFeedback in the row, under its buttons. */
+export function NeedsFormFeedback({ children }: { children: ReactNode }) {
+  return (
+    <div data-feedback-host="" className={styles.formFeedback}>
+      {children}
+    </div>
   );
 }
 

@@ -1491,6 +1491,8 @@ export interface DeviceEnablementPrompt {
   readonly projects: readonly string[];
   /** Set only when the machine serves exactly one project. */
   readonly preselected?: string;
+  /** C-832: the projects a person already chose (initializing or failed). */
+  readonly chosen?: readonly string[];
   /** The provider's fixed initialization steps (titles). */
   readonly steps: readonly string[];
   readonly phase: "pending" | "initializing" | "failed";
