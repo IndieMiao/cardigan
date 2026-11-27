@@ -143,13 +143,19 @@ function enabledText(reg: DeviceRegistration) {
   return `已启用${label(reg)}，给 ${reg.projects.join("、")} 用${reg.resolution ? `；分辨率 ${reg.resolution}` : ""}${reg.version ? `，系统版本 ${reg.version}` : ""}。`;
 }
 
-/** Cards of this project's queued Runs on the machine that only this device can serve. */
+/**
+ * Cards of this project's queued Runs on the machine that only this device can
+ * serve. `available` is the machine's verified capabilities: a queued
+ * `android.any` with no available emulator counts as waiting on the device
+ * (C-827).
+ */
 function waitingCards(
   store: Store,
   project: string,
   machine: string,
   reg: DeviceRegistration,
   usable: readonly DeviceObservation[],
+  available: readonly string[],
 ) {
   return store.uow.read((tx) => {
     const queued = new Set(
@@ -162,7 +168,14 @@ function waitingCards(
     for (const a of tx.assignments.list(project)) {
       if (a.machine_id !== machine || !queued.has(a.id) || !a.work_item_id)
         continue;
-      if (!waitsOnDevice(assignmentResourceKeys(tx, project, a), reg, usable))
+      if (
+        !waitsOnDevice(
+          assignmentResourceKeys(tx, project, a),
+          reg,
+          usable,
+          available,
+        )
+      )
         continue;
       const item = tx.work_items.get(project, a.work_item_id);
       if (item) cards.add(item.card_id);
@@ -205,12 +218,16 @@ export function syncDeviceActions(
   if (!regs.length) return;
   const projects = machineProjects(store, machine);
   if (!projects.includes(project)) return;
-  const health = readMachineObservations(
+  const observed = readMachineObservations(
     store,
     project,
     machine,
     clock.now(),
-  ).health;
+  );
+  const health = observed.health;
+  const available = observed.capabilities
+    .filter((c) => c.available)
+    .map((c) => c.key);
   const listing =
     health?.available && health.devices ? health.devices : undefined;
   for (const reg of regs) {
@@ -247,7 +264,7 @@ export function syncDeviceActions(
         deviceEnabledFor(registry.get(machine, d.type, d.id), project),
     );
     const cards = reason
-      ? waitingCards(store, project, machine, reg, usable)
+      ? waitingCards(store, project, machine, reg, usable, available)
       : [];
     if (reason && cards.length)
       reconcile(store, project, clock, {
