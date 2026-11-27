@@ -51,6 +51,7 @@ import {
   cancelMachineReservation,
   checkRegisteredMachine,
   configureMachinePlacement,
+  DeviceLeases,
   effectiveRunLimit,
   findMachineReservation,
   listMachineReservations,
@@ -1173,6 +1174,14 @@ async function machineCommand(
             ...(sub === "show" && config.adbSlots(m.id)
               ? {
                   adb_slots: new AdbSlots(store, config, undefined).diagnostics(
+                    m.id,
+                  ),
+                }
+              : {}),
+            // C-813: which Run holds which device (host operators only).
+            ...(sub === "show"
+              ? {
+                  device_leases: new DeviceLeases(store, config).diagnostics(
                     m.id,
                   ),
                 }
