@@ -330,7 +330,26 @@ test.each(["superseded", "rejected"] as const)(
   },
 );
 
-test.each(["optional", "completion", "produce"] as const)(
+test("C-836: a created untargeted verifier is refused instead of never dispatching", async () => {
+  const f = setup();
+  await f.deliver();
+  const before = f.state;
+  const { target_work_item_id: _target, ...withoutTarget } = params;
+  const result = createWorkItem(
+    f.state,
+    human,
+    { ...withoutTarget, kind: "verify" },
+    f.io,
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) return;
+  expect(result.error.code).toBe("validation_failed");
+  expect(result.error.message).toMatch(/验证项没有目标产出项，不会派发/);
+  expect(result.error.message).toMatch(/target_work_item_id/);
+  expect(f.state).toBe(before);
+});
+
+test.each(["optional", "produce"] as const)(
   "unrelated work item retains its existing behavior: %s",
   async (kind) => {
     const f = setup();
@@ -341,11 +360,7 @@ test.each(["optional", "completion", "produce"] as const)(
     const p =
       kind === "optional"
         ? { ...params, required: false }
-        : {
-            ...withoutTarget,
-            kind:
-              kind === "produce" ? ("produce" as const) : ("verify" as const),
-          };
+        : { ...withoutTarget, kind: "produce" as const };
     expect(f.commit(createWorkItem(f.state, human, p, f.io)).status).toBe(
       "todo",
     );

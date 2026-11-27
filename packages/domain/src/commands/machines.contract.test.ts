@@ -67,6 +67,15 @@ function state(): CommandState {
     work_items: s.work_items.map(({ assignment_id: _id, ...w }) => w),
   };
 }
+/**
+ * C-836: a readonly role cannot be assigned the fixture's producer on a repo
+ * card; placement does not depend on the repo, so drop it for that policy.
+ */
+function withoutRepo(s: CommandState, worktree: string | undefined) {
+  return worktree === "readonly"
+    ? { ...s, cards: s.cards.map(({ repo: _repo, ...c }) => c) }
+    : s;
+}
 const select = (
   s: CommandState,
   p: Partial<Parameters<typeof assign>[2]> = {},
@@ -236,13 +245,16 @@ function preferRemote(): CommandState {
 test.each(["write", "readonly", undefined] as const)(
   "interactive placement excludes remote for worktree policy %s, without bypassing local requirements",
   (worktree) => {
-    const s = {
-      ...preferRemote(),
-      roles: fixture().roles.map((r) => ({
-        ...r,
-        ...(worktree ? { worktree } : {}),
-      })),
-    };
+    const s = withoutRepo(
+      {
+        ...preferRemote(),
+        roles: fixture().roles.map((r) => ({
+          ...r,
+          ...(worktree ? { worktree } : {}),
+        })),
+      },
+      worktree,
+    );
     const reason = worktree
       ? `服务端远程 Git 工作树准备尚未验证（角色工作树策略：${worktree}）`
       : "角色工作树策略未知，无法确定远程 Git 工作树准备要求";
@@ -291,7 +303,7 @@ test.each(["write", "readonly", undefined] as const)(
       worktree_preparation: "verified",
     };
     const target: CommandState = {
-      ...base,
+      ...withoutRepo(base, worktree),
       roles: fixture().roles.map((r) => ({
         ...r,
         ...(worktree && { worktree }),
@@ -492,7 +504,7 @@ test.each(
   (worktree, proof) => {
     const base = preferRemote();
     const s: CommandState = {
-      ...base,
+      ...withoutRepo(base, worktree),
       roles: base.roles.map((r) => ({ ...r, worktree })),
       read_machine_placement: () =>
         placement([

@@ -2305,6 +2305,7 @@ test("C-237 manual assignment flag uses existing PM tool authority", async () =>
     title: "Held verifier",
     kind: "verify",
     role_id: "reviewer",
+    target_work_item_id: work("coder").id,
     required: false,
     completion_criteria: ["Review"],
   });
