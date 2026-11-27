@@ -1,10 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MACHINE_CAPABILITY_INTERVAL_MS } from "@cardigan/host";
+import {
+  DeviceRegistry,
+  MACHINE_CAPABILITY_INTERVAL_MS,
+} from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
-import { startMachineCapabilityLoop } from "./machine-capability-loop.js";
+import {
+  DEVICE_INIT_FOLLOWUP_MS,
+  startMachineCapabilityLoop,
+} from "./machine-capability-loop.js";
 
 test("patrol refreshes each project immediately and every 30 minutes, tolerates failure and drains on stop", async () => {
   vi.useFakeTimers();
@@ -121,6 +127,62 @@ test("C-666: worker usage is read after a passing check of a remote binding only
     expect(onError.mock.calls).toEqual([
       [new Error("Worker usage observation failed")],
     ]);
+  } finally {
+    await loop.stop();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+    vi.useRealTimers();
+  }
+});
+
+test("C-817: a device a person enabled is initialized by its project's check within a minute", async () => {
+  vi.useFakeTimers();
+  const root = mkdtempSync(join(tmpdir(), "capability-device-"));
+  const store = Store.open({ dataDir: root });
+  store.createProject({ id: "a" });
+  store.createProject({ id: "b" });
+  const refreshMachine = vi.fn(
+    async (
+      _project: string,
+      _machine: string,
+      _options?: { signal?: AbortSignal },
+    ) => ({ capabilities: [], health: null }),
+  );
+  const loop = startMachineCapabilityLoop({
+    store,
+    runtime: { refreshMachine },
+    onError: vi.fn(),
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    refreshMachine.mockClear();
+    // Nothing to initialize: the follow-up checks nothing.
+    await vi.advanceTimersByTimeAsync(DEVICE_INIT_FOLLOWUP_MS);
+    expect(refreshMachine).not.toHaveBeenCalled();
+    const registry = new DeviceRegistry(store);
+    const now = new Date().toISOString();
+    registry.discover(
+      "local",
+      { type: "android.device", id: "S1", state: "available" },
+      now,
+    );
+    registry.request({
+      machine: "local",
+      type: "android.device",
+      id: "S1",
+      request: "enable",
+      projects: ["b"],
+      now,
+    });
+    await vi.advanceTimersByTimeAsync(DEVICE_INIT_FOLLOWUP_MS);
+    expect(refreshMachine.mock.calls).toEqual([
+      ["b", "local", { signal: expect.any(AbortSignal) }],
+    ]);
+    // Claimed by a running check: not checked again until the claim is stale.
+    registry.claimInit("local", "android.device", "S1", "b", new Date().toISOString());
+    refreshMachine.mockClear();
+    await vi.advanceTimersByTimeAsync(DEVICE_INIT_FOLLOWUP_MS);
+    expect(refreshMachine).not.toHaveBeenCalled();
   } finally {
     await loop.stop();
     store.close();

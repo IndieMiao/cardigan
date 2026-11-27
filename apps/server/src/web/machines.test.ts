@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  DeviceRegistry,
   MachineCheckJournal,
   observationFingerprint,
   upgradeKey,
@@ -1173,6 +1174,137 @@ test("C-800 the machine detail lists every project's reservation; only the owner
         reservation_id: "rsv-1",
         reason: "所有者要求恢复模拟器",
       }),
+    ]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("C-817: only the owner's login session enables, disables or assigns a device, and the check starts right away", async () => {
+  const check = vi.fn<MachineHost["check"]>(async () => ({
+    blockers: [],
+    launch_enabled: true,
+  }));
+  const f = await m5Cross({
+    machineHost: {
+      check,
+      bindings: () => () => null,
+      workerRecord: () => null,
+    },
+  });
+  try {
+    const store = f.store(),
+      project = f.project.project_id;
+    const SERIAL = "WGC6R21609003324";
+    const registry = new DeviceRegistry(store);
+    registry.discover(
+      "local",
+      {
+        type: "android.device",
+        id: SERIAL,
+        state: "available",
+        model: "MRR-W39",
+      },
+      new Date(f.now()).toISOString(),
+    );
+    const list = f.projectPath("/machines/local/devices");
+    const device = `${list}/android.device/${SERIAL}`;
+    const headers = { authorization: `Bearer ${f.token(f.primary.owner)}` };
+    expect(
+      (
+        await f.call(device, {
+          anonymous: true,
+          method: "POST",
+          body: { request: "enable" },
+        })
+      ).status,
+    ).toBe(401);
+    await f.password(TEST_PASSWORD);
+    await f.login();
+    // An Agent token never reaches the device endpoint.
+    expect(
+      (
+        await f.call(device, {
+          headers,
+          method: "POST",
+          body: { request: "enable", projects: [project] },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await f.call(list)).json).toMatchObject({
+      devices: [
+        {
+          machine: "local",
+          id: SERIAL,
+          status: "pending",
+          choices: [project],
+        },
+      ],
+    });
+    for (const body of [
+      { request: "wipe" },
+      { request: "enable", projects: "all" },
+      { request: "enable", command: "reboot" },
+      { request: "disable", projects: [project] },
+      { request: "assign" },
+    ])
+      expect((await f.call(device, { method: "POST", body })).status).toBe(
+        400,
+      );
+    expect(
+      (
+        await f.call(`${list}/android.device/NOPE`, {
+          method: "POST",
+          body: { request: "enable" },
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await f.call(
+          f.projectPath(`/machines/elsewhere/devices/android.device/${SERIAL}`),
+          { method: "POST", body: { request: "enable" } },
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await f.call(device, {
+          method: "POST",
+          body: { request: "enable", projects: ["not-on-this-machine"] },
+        })
+      ).status,
+    ).toBe(409);
+    const enabled = await f.call(device, {
+      method: "POST",
+      body: { request: "enable", projects: [project] },
+    });
+    expect(enabled.status).toBe(200);
+    expect(enabled.json).toMatchObject({
+      device: { status: "initializing", init_project: project },
+    });
+    // The initialization check is started at once for that project.
+    await vi.waitFor(() => expect(check).toHaveBeenCalled());
+    expect(check.mock.calls[0]?.slice(0, 2)).toEqual([project, "local"]);
+    expect(
+      (
+        await f.call(device, {
+          method: "POST",
+          body: { request: "disable" },
+        })
+      ).json,
+    ).toMatchObject({ device: { status: "disabled" } });
+    const audit = store.uow
+      .read((tx) => tx.global_events.listAfter(0))
+      .filter((e) => e.type === "machine_device_requested");
+    expect(audit.map((e) => e.payload)).toEqual([
+      expect.objectContaining({
+        request: "enable",
+        via: "workbench",
+        member_id: expect.any(String),
+        resource: `android.device:${SERIAL}`,
+      }),
+      expect.objectContaining({ request: "disable", status: "disabled" }),
     ]);
   } finally {
     await f.close();

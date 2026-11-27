@@ -4,6 +4,7 @@ import {
   type DeviceRegistration,
   deviceActionKey,
   deviceEnabledFor,
+  deviceResourceName,
   deviceUnavailableReason,
   normalizeDeviceInitResult,
   preselectedDeviceProject,
@@ -275,15 +276,35 @@ export function syncDeviceActionsEverywhere(
 
 /**
  * A person's device request (human-only callers: the Workbench session of
- * the owner, the host CLI). Registry and every project's to-dos change
- * together; the initialization itself runs in the next machine check.
+ * the owner, the host CLI). The registry change is audited globally and
+ * every project's to-dos follow; the initialization itself runs in the next
+ * machine check.
  */
 export function requestDevice(
   store: Store,
   input: Omit<Parameters<DeviceRegistry["request"]>[0], "now">,
   clock: Clock,
+  audit: { via: "cli" | "workbench"; member_id?: string } = { via: "cli" },
 ) {
   const reg = new DeviceRegistry(store).request({ ...input, now: clock.now() });
+  store.uow.run((tx) =>
+    tx.global_events.append({
+      id: tx.global_ids.nextEventId(),
+      seq: tx.global_ids.nextEventSequence(),
+      created_at: clock.now(),
+      type: "machine_device_requested",
+      actor: { kind: "human" },
+      payload: {
+        machine_id: reg.machine,
+        resource: deviceResourceName(reg.type, reg.id),
+        request: input.request,
+        status: reg.status,
+        projects: [...reg.projects],
+        via: audit.via,
+        ...(audit.member_id ? { member_id: audit.member_id } : {}),
+      },
+    }),
+  );
   syncDeviceActionsEverywhere(store, input.machine, clock);
   return reg;
 }

@@ -1,5 +1,6 @@
 import type { Clock, ProjectId } from "@cardigan/domain";
 import {
+  DeviceRegistry,
   MACHINE_CAPABILITY_INTERVAL_MS,
   type RuntimeTargets,
 } from "@cardigan/host";
@@ -21,6 +22,8 @@ import type { MachineHost } from "./web/machine-host.js";
 export const HELPER_SIBLING_FOLLOWUP_MS = 60 * 1000;
 /** Follow-ups per sibling confirmation, spaced 1, 2, 4 and 8 rounds apart. */
 export const HELPER_SIBLING_FOLLOWUP_ATTEMPTS = 4;
+/** C-817: how often to look for device initializations a person requested. */
+export const DEVICE_INIT_FOLLOWUP_MS = 60 * 1000;
 
 export function startMachineCapabilityLoop(options: {
   readonly store: Store;
@@ -179,11 +182,42 @@ export function startMachineCapabilityLoop(options: {
           for (const key of failing) if (!seen.has(key)) failing.delete(key);
         }),
     });
+  // C-817: a device a person just enabled is initialized by a check of its
+  // initializing project's account within a minute, not at the next patrol.
+  const devices = startTimerLoop({
+    startup: options.startup,
+    signal: controller.signal,
+    name: "device-init-followup",
+    initialDelayMs: DEVICE_INIT_FOLLOWUP_MS,
+    intervalMs: DEVICE_INIT_FOLLOWUP_MS,
+    slowTickMs: MACHINE_CAPABILITY_INTERVAL_MS,
+    onError: options.onError,
+    tick: () =>
+      exclusive(async () => {
+        const due = new DeviceRegistry(options.store).dueInits(
+          new Date().toISOString(),
+        );
+        const targets = new Set(
+          due.map((d) => `${d.init_project}\0${d.machine}`),
+        );
+        for (const target of targets) {
+          if (controller.signal.aborted) return;
+          const [project, machine] = target.split("\0") as [string, string];
+          try {
+            await patrol(project, machine);
+          } catch {
+            options.onError(new Error("Device initialization check failed"));
+          }
+        }
+      }),
+  });
   return {
-    done: Promise.all([loop.done, followup?.done]).then(() => {}),
+    done: Promise.all([loop.done, followup?.done, devices.done]).then(
+      () => {},
+    ),
     stop: async () => {
       controller.abort();
-      await Promise.all([loop.stop(), followup?.stop()]);
+      await Promise.all([loop.stop(), followup?.stop(), devices.stop()]);
     },
   };
 }
