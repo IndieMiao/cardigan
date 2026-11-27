@@ -59,8 +59,21 @@ export type ReservedElsewhere = (
   now: string,
 ) => boolean;
 
+/**
+ * The lease table exists. Fixtures that replay an older schema (upgrade
+ * tests) run this code before the C-813 migration; nothing can be held then.
+ */
+function hasLeaseTable(store: Store) {
+  return !!store.database
+    .prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='machine_device_leases'",
+    )
+    .get();
+}
+
 /** Devices of a type some live lease on this machine holds (any project). */
 export function heldDevices(store: Store, machine: string, type: string) {
+  if (!hasLeaseTable(store)) return new Set<string>();
   return new Set(
     (
       store.database
@@ -86,6 +99,7 @@ export class DeviceLeases {
     );
   }
   private held(project: string, run: string): Row[] {
+    if (!hasLeaseTable(this.store)) return [];
     return this.store.database
       .prepare(
         "SELECT * FROM machine_device_leases WHERE project=? AND run_id=? AND released_at IS NULL ORDER BY type",
@@ -215,6 +229,15 @@ export class DeviceLeases {
       .filter((r) => r.machine === machine)
       .map((r) => this.device(project, r, now));
   }
+  /** Some Run of this Assignment has held a device (its session must not carry over). */
+  heldBefore(project: string, assignment: string) {
+    if (!hasLeaseTable(this.store)) return false;
+    return !!this.store.database
+      .prepare(
+        "SELECT 1 FROM machine_device_leases WHERE project=? AND assignment_id=? LIMIT 1",
+      )
+      .get(project, assignment);
+  }
   /** Every type this Run needs is held (relaunch and publication checks). */
   holds(project: string, run: string, keys: readonly string[]) {
     const held = this.held(project, run);
@@ -263,6 +286,7 @@ export class DeviceLeases {
   }
   /** Release leases of ended Runs (database only; no device action). */
   reconcile(project: string, clock: () => string) {
+    if (!hasLeaseTable(this.store)) return;
     const due = this.store.database
       .prepare(
         "SELECT * FROM machine_device_leases WHERE project=? AND released_at IS NULL",
@@ -292,6 +316,7 @@ export class DeviceLeases {
   }
   /** Host diagnostics: who holds which device on this machine. */
   diagnostics(machine: string): DeviceLeaseDiagnostic[] {
+    if (!hasLeaseTable(this.store)) return [];
     return (
       this.store.database
         .prepare(

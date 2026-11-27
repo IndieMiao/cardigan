@@ -158,9 +158,7 @@ export class MachineLeases {
       // A new Run must not inherit the previous Run's released adb ports.
       this.adbNeeded(project, a) ||
       // C-813: nor a device the previous Run held.
-      this.devices.required(
-        this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a)),
-      ).length > 0 ||
+      this.devices.heldBefore(project, a.id) ||
       !!this.store.database
         .prepare(
           "SELECT 1 FROM machine_resource_leases WHERE project=? AND assignment_id=? LIMIT 1",
