@@ -402,6 +402,7 @@ export async function createHostWiring(options: {
             : {}),
           ...(input.resourceGate ? { resourceGate: input.resourceGate } : {}),
           ...(input.replacement ? { replacement: input.replacement } : {}),
+          ...(input.leases ? { leases: input.leases } : {}),
         },
       ),
   };
