@@ -6,8 +6,11 @@ export {
   Copy as CopyIcon,
   Download as DownloadIcon,
   Ellipsis as MoreHorizontalIcon,
+  Scan as FitIcon,
   TriangleAlert as AlertIcon,
   X as CloseIcon,
+  ZoomIn as ZoomInIcon,
+  ZoomOut as ZoomOutIcon,
 } from "lucide-react";
 
 export function ListIcon() {

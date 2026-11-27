@@ -474,7 +474,8 @@ test("C-95: referenced images show as thumbnails that open the lightbox; other f
   fireEvent.click(thumb);
   const dialog = await screen.findByRole("dialog");
   const original = within(dialog).getByRole("img", { name: "附件 before.png" });
-  expect(original.className).toBe("lightbox-image");
+  // C-830: the preview image sits in the zoomable viewport.
+  expect(original.closest("[data-lightbox-blank]")).not.toBeNull();
   expect(original.getAttribute("src")).toBe(
     "/api/projects/p-1/attachments/F-1",
   );

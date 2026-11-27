@@ -1,5 +1,12 @@
 import { type ReactElement, type ReactNode, useEffect, useState } from "react";
+import { percent } from "./imageZoom.js";
+import {
+  LightboxPicture,
+  LightboxViewport,
+  LightboxZoomBar,
+} from "./layout/LightboxLayout.js";
 import * as Dialog from "./ui/dialog.js";
+import { useImageZoom } from "./useImageZoom.js";
 
 export interface LightboxImage {
   readonly src: string;
@@ -18,7 +25,12 @@ export interface LightboxProps {
   readonly trigger?: ReactElement;
 }
 
-/** Fullscreen image preview with arrow-key and button navigation. */
+/**
+ * Fullscreen image preview with arrow-key and button navigation. C-830: the
+ * image zooms (buttons, wheel or trackpad, double click or tap, pinch) and
+ * pans by dragging; a click on blank space closes it, the end of a drag
+ * does not.
+ */
 export function Lightbox({
   open,
   onOpenChange,
@@ -34,6 +46,7 @@ export function Lightbox({
     (failed.has(current.src) && current.fallbackSrc
       ? current.fallbackSrc
       : current.src);
+  const zoom = useImageZoom(source);
   /**
    * §9 U6a: a preview dims the whole viewport, so the page records it and the
    * drawer drops its own mask instead of stacking two of them.
@@ -63,6 +76,19 @@ export function Lightbox({
           onKeyDown={(event) => {
             if (event.key === "ArrowLeft") move(-1);
             if (event.key === "ArrowRight") move(1);
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            if (event.key === "+" || event.key === "=") zoom.zoomIn();
+            if (event.key === "-") zoom.zoomOut();
+            if (event.key === "0") zoom.fit();
+          }}
+          onClick={(event) => {
+            if (zoom.consumeDrag(event)) return;
+            const target = event.target as Element;
+            if (
+              target === event.currentTarget ||
+              target.hasAttribute("data-lightbox-blank")
+            )
+              onOpenChange(false);
           }}
         >
           <Dialog.Title className="visually-hidden">
@@ -78,16 +104,25 @@ export function Lightbox({
             </button>
           </Dialog.Close>
           <div className="lightbox-stage">
-            {current && (
-              <img
-                className="lightbox-image"
-                src={source}
-                alt={current.alt}
-                onError={() =>
-                  setFailed((previous) => new Set(previous).add(current.src))
-                }
-              />
-            )}
+            <LightboxViewport
+              ref={zoom.stage}
+              pannable={zoom.pannable}
+              dragging={zoom.dragging}
+              {...zoom.stageHandlers}
+            >
+              {current && (
+                <LightboxPicture
+                  src={source}
+                  alt={current.alt}
+                  view={zoom.view}
+                  natural={zoom.natural}
+                  onLoad={zoom.onImageLoad}
+                  onError={() =>
+                    setFailed((previous) => new Set(previous).add(current.src))
+                  }
+                />
+              )}
+            </LightboxViewport>
             {images.length > 1 && (
               <>
                 <button
@@ -109,7 +144,18 @@ export function Lightbox({
               </>
             )}
           </div>
-          <p className="lightbox-caption">
+          {current && (
+            <LightboxZoomBar
+              value={zoom.view ? percent(zoom.view) : "—"}
+              atMin={zoom.atMin}
+              atMax={zoom.atMax}
+              onZoomOut={zoom.zoomOut}
+              onZoomIn={zoom.zoomIn}
+              onFit={zoom.fit}
+              onActualSize={() => zoom.actualSize()}
+            />
+          )}
+          <p className="lightbox-caption" data-lightbox-blank="">
             <span>{current?.caption ?? current?.alt ?? "没有图片"}</span>
             {images.length > 0 && (
               <span>
