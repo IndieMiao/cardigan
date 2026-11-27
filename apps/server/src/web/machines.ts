@@ -1,8 +1,17 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { activeOwner, type Clock, saveMachine } from "@cardigan/domain";
+import {
+  activeOwner,
+  type Clock,
+  type DeviceRegistration,
+  saveMachine,
+} from "@cardigan/domain";
 import {
   cancelMachineReservation,
+  DeviceRegistry,
+  DeviceRequestError,
+  machineProjects,
   RESERVATION_CANCEL_REASON_MAX,
+  requestDevice,
 } from "@cardigan/host";
 import { persistEffect } from "@cardigan/mcp-server";
 import type {
@@ -29,7 +38,10 @@ interface Context extends MachineViewOptions {
   authorize: () => WebSession;
 }
 /** Machine writes need the project's active owner session. */
-function ownerMember(c: Context, tx: StoreTransactionContext) {
+function ownerMember(
+  c: Context,
+  tx: { members: Pick<StoreTransactionContext["members"], "list"> },
+) {
   const member = c.authorize().member_id;
   if (!member || activeOwner(tx.members.list())?.id !== member)
     throw new HttpRejection(403, "unauthorized", "需要有效的人成员身份");
@@ -91,6 +103,12 @@ export async function serveMachines(c: Context, project: string, rest: string) {
     );
   if (cancel?.[1] && cancel[2])
     return cancelReservation(c, project, cancel[1], cancel[2]);
+  const devices =
+    /^\/machines\/([A-Za-z0-9][A-Za-z0-9._-]*)\/devices(?:\/([a-z][a-z0-9.-]{0,47})\/([A-Za-z0-9][A-Za-z0-9._-]{0,63}))?$/.exec(
+      rest,
+    );
+  if (devices?.[1])
+    return serveDevices(c, project, devices[1], devices[2], devices[3]);
   const match =
     /^\/machines(?:\/([A-Za-z0-9][A-Za-z0-9._-]*)(?:\/(drain|resume|check|checks\/([^/]+)))?)?$/.exec(
       rest,
@@ -177,4 +195,81 @@ export async function serveMachines(c: Context, project: string, rest: string) {
     );
   });
   sendJson(c.res, 200, { machine_id: machine, status });
+}
+
+/**
+ * C-817: the owner enables, disables or (re)assigns an external device on a
+ * machine this project registers (Needs You one-click, later the settings
+ * page). The initialization itself runs in a machine check, started here
+ * right away and otherwise by the device follow-up patrol within a minute.
+ */
+async function serveDevices(
+  c: Context,
+  project: string,
+  machine: string,
+  type: string | undefined,
+  id: string | undefined,
+) {
+  const registered = c.store.uow.read(
+    (tx) => !!tx.machines.get(project, machine),
+  );
+  if (!registered) throw missing();
+  if (!type || !id) {
+    if (c.req.method !== "GET") methodNotAllowed(["GET"]);
+    const choices = machineProjects(c.store, machine);
+    return sendJson(c.res, 200, {
+      devices: new DeviceRegistry(c.store)
+        .list(machine)
+        .map((d) => ({ ...d, choices })),
+    });
+  }
+  if (c.req.method !== "POST") methodNotAllowed(["POST"]);
+  const body = await readJsonBody(c.req);
+  const request = body.request;
+  if (
+    Object.keys(body).some((k) => k !== "request" && k !== "projects") ||
+    (request !== "enable" && request !== "disable" && request !== "assign") ||
+    (body.projects !== undefined &&
+      (!Array.isArray(body.projects) ||
+        body.projects.length > 32 ||
+        body.projects.some((p) => typeof p !== "string"))) ||
+    (request === "disable" && body.projects !== undefined) ||
+    (request === "assign" && body.projects === undefined)
+  )
+    throw new HttpRejection(400, "validation_failed", "无效操作参数");
+  const member = c.store.uow.read((tx) => ownerMember(c, tx));
+  let device: DeviceRegistration;
+  try {
+    device = requestDevice(
+      c.store,
+      {
+        machine,
+        type,
+        id,
+        request,
+        ...(body.projects ? { projects: body.projects as string[] } : {}),
+      },
+      c.clock,
+      { via: "workbench", member_id: member },
+    );
+  } catch (error) {
+    if (error instanceof DeviceRequestError)
+      throw new HttpRejection(
+        error.code === "device_not_found" ? 404 : 409,
+        error.code === "device_not_found" ? "not_found" : "illegal_transition",
+        error.message,
+      );
+    throw error;
+  }
+  if (device.status === "initializing" && device.init_project)
+    try {
+      c.checks.start(device.init_project, machine, "machine", (tx) =>
+        ownerMember(c, tx),
+      );
+    } catch {
+      // The device follow-up patrol runs it within a minute.
+    }
+  sendJson(c.res, 200, {
+    device: { ...device, choices: machineProjects(c.store, machine) },
+  });
 }

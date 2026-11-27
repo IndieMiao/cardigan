@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type DeviceObservation,
+  normalizeDeviceInitResult,
   normalizeDeviceInventory,
 } from "@cardigan/domain";
 import { expect, test, vi } from "vitest";
 import {
+  ANDROID_DEVICE_INIT_COMMAND,
+  ANDROID_DEVICE_INIT_SCRIPT,
+  ANDROID_DEVICE_INIT_STEPS,
   ANDROID_DEVICE_PROBE_COMMAND,
   ANDROID_DEVICE_PROBE_SCRIPT,
   androidDeviceProvider,
@@ -169,3 +173,156 @@ test("the real listing script uses a throw-away adb server and stops it", async 
     await rm(bin, { recursive: true, force: true });
   }
 }, 20_000);
+
+const fakeInitAdb = `#!/usr/bin/env python3
+import os, socket, sys
+args = sys.argv[1:]
+log = os.environ['FAKE_ADB_LOG']
+if args[:1] != ['-P'] or args[2:] != ['server', 'nodaemon']:
+    open(log, 'a').write('client ' + ' '.join(args) + '\\n'); sys.exit(1)
+state = os.environ.get('FAKE_STATE', 'device')
+lock = os.environ.get('FAKE_LOCK', 'true')
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(('127.0.0.1', int(args[1]))); srv.listen(8)
+def read(c):
+    n = int(c.recv(4), 16); return c.recv(n).decode()
+while True:
+    c, _ = srv.accept()
+    req = read(c)
+    if req == 'host:kill':
+        c.sendall(b'OKAY'); c.close(); open(log, 'a').write('killed\\n'); sys.exit(0)
+    if req == 'host:devices':
+        data = ('WGC6R21609003324\\t' + state + '\\nOTHER\\tdevice\\n').encode() if state else b''
+        c.sendall(b'OKAY' + b'%04x' % len(data) + data)
+    elif req == 'host:transport:WGC6R21609003324':
+        c.sendall(b'OKAY')
+        cmd = read(c)
+        open(log, 'a').write(cmd + '\\n')
+        if cmd.startswith('shell:settings put global stay_on'):
+            out = '7\\n'
+        elif cmd.startswith('shell:settings put global window'):
+            out = '0.0\\n0.0\\n0\\n'
+        elif cmd.startswith('shell:locksettings'):
+            out = ('' if lock == 'true' else 'Old password provided is invalid\\n') + lock + '\\n'
+        elif cmd.startswith('shell:wm size'):
+            out = 'Physical size: 1600x2560\\n12\\n'
+        else:
+            out = 'unexpected\\n'
+        c.sendall(b'OKAY' + out.encode())
+    else:
+        c.sendall(b'FAIL')
+    c.close()
+`;
+
+async function runInit(env: Record<string, string>) {
+  const bin = await mkdtemp(join(tmpdir(), "cg-fake-adb-init-"));
+  try {
+    await writeFile(join(bin, "adb"), fakeInitAdb);
+    await chmod(join(bin, "adb"), 0o755);
+    const log = join(bin, "log");
+    const output = await new Promise<string>((resolve, reject) => {
+      const child = spawn(
+        "python3",
+        [...ANDROID_DEVICE_INIT_COMMAND.slice(1), "WGC6R21609003324"],
+        {
+          env: {
+            PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+            FAKE_ADB_LOG: log,
+            ANDROID_ADB_SERVER_PORT: "5137",
+            ...env,
+          },
+          stdio: ["ignore", "pipe", "inherit"],
+        },
+      );
+      let out = "";
+      child.stdout.on("data", (b: Buffer) => {
+        out += b.toString();
+      });
+      child.once("error", reject);
+      child.once("close", (code) =>
+        code === 0 ? resolve(out) : reject(new Error(`exit ${code}`)),
+      );
+    });
+    return {
+      result: JSON.parse(output) as unknown,
+      log: (await readFile(log, "utf8")).trim().split("\n"),
+    };
+  } finally {
+    await rm(bin, { recursive: true, force: true });
+  }
+}
+
+test("C-817: the real initialization changes only the three declared settings on the given device and stops its server", async () => {
+  const ok = await runInit({});
+  expect(
+    normalizeDeviceInitResult(ok.result, ANDROID_DEVICE_INIT_STEPS),
+  ).toEqual({ ok: true, resolution: "1600x2560", version: "12" });
+  const commands = ok.log.filter((l) => l.startsWith("shell:"));
+  expect(commands).toEqual([
+    "shell:settings put global stay_on_while_plugged_in 7;settings get global stay_on_while_plugged_in",
+    expect.stringMatching(
+      /^shell:settings put global window_animation_scale 0;settings put global transition_animation_scale 0;settings put global animator_duration_scale 0;/u,
+    ),
+    "shell:locksettings set-disabled true;locksettings get-disabled",
+    "shell:wm size;getprop ro.build.version.release",
+  ]);
+  // Never the other device, never an adb client, the server was stopped.
+  expect(ok.log.at(-1)).toBe("killed");
+  expect(ok.log.some((l) => l.startsWith("client"))).toBe(false);
+  // A lock credential refuses the lock step: reported by key, nothing else runs.
+  const locked = await runInit({ FAKE_LOCK: "false" });
+  expect(
+    normalizeDeviceInitResult(locked.result, ANDROID_DEVICE_INIT_STEPS),
+  ).toEqual({
+    ok: false,
+    reason: expect.stringMatching(/^“关闭锁屏”没有成功：/u),
+  });
+  expect(locked.log.some((l) => l.startsWith("shell:wm size"))).toBe(false);
+  expect(
+    normalizeDeviceInitResult(
+      (await runInit({ FAKE_STATE: "unauthorized" })).result,
+      ANDROID_DEVICE_INIT_STEPS,
+    ),
+  ).toMatchObject({ ok: false, reason: expect.stringContaining("授权") });
+  expect(
+    normalizeDeviceInitResult(
+      (await runInit({ FAKE_STATE: "" })).result,
+      ANDROID_DEVICE_INIT_STEPS,
+    ),
+  ).toMatchObject({ ok: false, reason: expect.stringContaining("没有看到") });
+}, 60_000);
+
+test("C-817: the initialization script installs, removes, resets or reboots nothing, and the serial is argv, not code", async () => {
+  expect(ANDROID_DEVICE_INIT_SCRIPT).not.toMatch(
+    /\bpm (?:install|uninstall|clear)|\binstall\b|uninstall|wipe|reboot|recovery|factory|reset|push|pull|rm /u,
+  );
+  const probe = vi.fn<CapabilityProbe>(async () => ({
+    ok: true,
+    output: JSON.stringify({ result: "ok", resolution: "1x1" }),
+  }));
+  const execution = { mode: "local", dataDir: "/nonexistent" } as const;
+  const initialize = androidDeviceProvider.initialize;
+  if (!initialize) throw new Error("missing initialize");
+  expect(await initialize({ execution, os: "linux", probe }, TABLET)).toEqual({
+    result: "ok",
+    resolution: "1x1",
+  });
+  expect(probe.mock.calls[0]?.[2]).toEqual([
+    ...ANDROID_DEVICE_INIT_COMMAND,
+    TABLET.id,
+  ]);
+  // A malformed id never reaches the worker.
+  probe.mockClear();
+  expect(
+    await initialize(
+      { execution, os: "linux", probe },
+      { ...TABLET, id: "x;reboot" },
+    ),
+  ).toBeUndefined();
+  expect(probe).not.toHaveBeenCalled();
+  expect(androidDeviceProvider.init_steps?.map((s) => s.title)).toEqual([
+    "插电常亮",
+    "关闭动画",
+    "关闭锁屏",
+  ]);
+});

@@ -2,6 +2,7 @@ import type {
   Assignment,
   CardId,
   CommandState,
+  DeviceRegistration,
   HumanActionId,
   Machine,
   MergeClassificationInput,
@@ -52,13 +53,17 @@ import {
   checkRegisteredMachine,
   configureMachinePlacement,
   DeviceLeases,
+  DeviceRegistry,
+  DeviceRequestError,
   effectiveRunLimit,
   findMachineReservation,
   listMachineReservations,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   MachineLeases,
+  machineProjects,
   RuntimeTargets,
+  requestDevice,
   targetProbe,
   withCapacityOverrides,
 } from "@cardigan/host";
@@ -123,6 +128,10 @@ const USAGE = [
   "  cardigan machine register|update <编号> --label <名称> --os <系统> --arch <架构> [--tags <逗号分隔标签>] [--status online|degraded|offline|draining] [--project <p>]",
   "    update 的 label/os/arch 同步到该物理机器的所有已登记项目；tags/status 只修改当前项目。",
   "  cardigan machine reserve <机器> --resource <键> --start <带时区时间> --end <带时区时间> [--project <p>]",
+  "  cardigan machine device list [<机器>]",
+  "  cardigan machine device enable <机器> <类型>:<设备编号> [--projects <p1,p2>] [--no-check]",
+  "  cardigan machine device disable <机器> <类型>:<设备编号>",
+  "  cardigan machine device assign <机器> <类型>:<设备编号> --projects <p1,p2>",
   "  cardigan machine reservation list [--machine <机器>]  列出各项目当前和未来的资源预约（持有项目、来源、起止时间、预约编号）",
   "  cardigan machine reservation cancel <预约编号> --reason <原因>  仅人可用：提前结束预约，写事件并让被挡的 Run 重新排队",
   "  cardigan machine list|show|drain|check [编号] [--project <p>]  人专属登记与检查；远程现场探测尚未启用",
@@ -1052,6 +1061,157 @@ function machineReservationCommand(args: readonly string[], io: CliIo): number {
   }
 }
 
+/**
+ * C-817: `cardigan machine device list|enable|disable|assign`. Human only
+ * (like every machine command); enabling runs the device's initialization in
+ * a machine check right away, as the project the registry picked.
+ */
+async function machineDeviceCommand(
+  args: readonly string[],
+  io: CliIo,
+): Promise<number> {
+  const [sub, ...rest] = args;
+  if (!["list", "enable", "disable", "assign"].includes(sub ?? ""))
+    throw new CliError(
+      "用法：cardigan machine device list|enable|disable|assign",
+      EXIT.usage,
+    );
+  const parsed = parseArgs(rest, ["no-check"]);
+  const allowed = ["project", "data-dir"];
+  if (sub === "enable") allowed.push("projects", "no-check");
+  if (sub === "assign") allowed.push("projects");
+  for (const key of Object.keys(parsed.flags))
+    if (!allowed.includes(key))
+      throw new CliError(`machine device ${sub} 不接受 --${key}`, EXIT.usage);
+  const [machine, resource] = parsed.positionals;
+  if (sub !== "list" && (!machine || !resource))
+    throw new CliError(
+      `用法：cardigan machine device ${sub} <机器> <类型>:<设备编号>`,
+      EXIT.usage,
+    );
+  const store = openStoreFrom(io, parsed.flags);
+  try {
+    const project_id = resolveProject(
+      store,
+      io,
+      optional(parsed.flags, "project"),
+    );
+    if (resolveActor(io, project_id, store).kind !== "human")
+      throw new CliError("机器管理仅限人类操作", EXIT.usage);
+    const registry = new DeviceRegistry(store);
+    if (sub === "list") {
+      io.stdout(
+        JSON.stringify(
+          registry
+            .list(machine)
+            .map((d) => ({ ...d, choices: machineProjects(store, d.machine) })),
+          null,
+          2,
+        ),
+      );
+      return EXIT.ok;
+    }
+    const split = (resource as string).indexOf(":");
+    const type = (resource as string).slice(0, split);
+    const id = (resource as string).slice(split + 1);
+    if (split < 1 || !id)
+      throw new CliError("设备写成 <类型>:<设备编号>", EXIT.usage);
+    const machineId = machine as string;
+    const projects = optional(parsed.flags, "projects")
+      ?.split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const choices = machineProjects(store, machineId);
+    const current = registry.get(machineId, type, id);
+    let reg: DeviceRegistration;
+    try {
+      reg = requestDevice(
+        store,
+        {
+          machine: machineId,
+          type,
+          id,
+          request: sub as "enable" | "disable" | "assign",
+          ...(projects
+            ? { projects }
+            : sub !== "disable" &&
+                !current?.projects.length &&
+                choices.length === 1
+              ? { projects: choices }
+              : {}),
+        },
+        systemClock,
+      );
+    } catch (error) {
+      if (error instanceof DeviceRequestError)
+        throw new CliError(
+          sub !== "disable" && !projects && choices.length > 1
+            ? `${error.message}；这台机器给多个项目用，用 --projects 指定（${choices.join(",")}）`
+            : error.message,
+          EXIT.failure,
+        );
+      throw error;
+    }
+    if (
+      sub === "enable" &&
+      reg.status === "initializing" &&
+      reg.init_project &&
+      parsed.flags["no-check"] !== true
+    ) {
+      await checkMachineFromCli(
+        io,
+        store,
+        parsed.flags,
+        reg.init_project,
+        machineId,
+      );
+      reg = registry.get(machineId, type, id) ?? reg;
+    }
+    io.stdout(JSON.stringify(reg, null, 2));
+    if (sub === "enable" && reg.status === "failed")
+      throw new CliError(
+        `初始化失败：${reg.failure ?? "未知原因"}`,
+        EXIT.failure,
+      );
+    return EXIT.ok;
+  } finally {
+    store.close();
+  }
+}
+
+/** One machine check for `project` (CLI `machine check`, C-817 device enable). */
+async function checkMachineFromCli(
+  io: CliIo,
+  store: Store,
+  flags: Record<string, string | true>,
+  project_id: string,
+  machineId: string,
+) {
+  const dataDir = resolveDataDir(io, optional(flags, "data-dir"));
+  return checkRegisteredMachine(
+    {
+      store,
+      project: project_id,
+      machine: machineId,
+      env: io.env,
+      browsersPath: () =>
+        loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
+          ?.browsers_path,
+    },
+    async () => {
+      const connection = await terminalExecution(io, dataDir, null, machineId);
+      const created = await RuntimeTargets.create({
+        ...connection,
+        env: io.env,
+        store,
+        project: project_id,
+      });
+      if (!created.ok) throw new CliError(created.error.message, EXIT.failure);
+      return created.value;
+    },
+  );
+}
+
 async function machineCommand(
   args: readonly string[],
   io: CliIo,
@@ -1064,6 +1224,7 @@ async function machineCommand(
     throw new CliError("机器管理仅限人类操作，Token 模式不可用。", EXIT.usage);
   const [sub, ...rest] = args;
   if (sub === "reservation") return machineReservationCommand(rest, io);
+  if (sub === "device") return machineDeviceCommand(rest, io);
   if (
     ![
       "register",
@@ -1076,7 +1237,7 @@ async function machineCommand(
     ].includes(sub ?? "")
   )
     throw new CliError(
-      "用法：cardigan machine register|update|list|show|drain|check|reserve|reservation",
+      "用法：cardigan machine register|update|list|show|drain|check|reserve|reservation|device",
       EXIT.usage,
     );
   const parsed = parseArgs(rest, []);
@@ -1193,34 +1354,12 @@ async function machineCommand(
       );
       if (sub === "check") {
         const machine = selected[0] as Machine;
-        const dataDir = resolveDataDir(io, optional(parsed.flags, "data-dir"));
-        const observations = await checkRegisteredMachine(
-          {
-            store,
-            project: project_id,
-            machine: machine.id,
-            env: io.env,
-            browsersPath: () =>
-              loadOptionalConfigSync(cliLaunchPaths(io, dataDir))?.browser
-                ?.browsers_path,
-          },
-          async () => {
-            const connection = await terminalExecution(
-              io,
-              dataDir,
-              null,
-              machine.id,
-            );
-            const created = await RuntimeTargets.create({
-              ...connection,
-              env: io.env,
-              store,
-              project: project_id,
-            });
-            if (!created.ok)
-              throw new CliError(created.error.message, EXIT.failure);
-            return created.value;
-          },
+        const observations = await checkMachineFromCli(
+          io,
+          store,
+          parsed.flags,
+          project_id,
+          machine.id,
         );
         io.stdout(JSON.stringify(observations, null, 2));
         if (!observations.health?.available)

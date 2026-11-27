@@ -3,6 +3,7 @@ import {
   type Assignment,
   chooseDevice,
   type DeviceObservation,
+  deviceEnabledFor,
   deviceResourceName,
   isDeviceKey,
   type Run,
@@ -20,6 +21,7 @@ import {
   DEVICE_PROVIDERS,
   type HostDeviceProvider,
 } from "./device-providers.js";
+import { DeviceRegistry } from "./device-registry.js";
 
 /**
  * C-813: exclusive leases on single devices (`<type>:<id>`, capacity 1).
@@ -123,9 +125,12 @@ export class DeviceLeases {
     now: string,
   ): DeviceObservation | undefined {
     const taken = heldDevices(this.store, machine, provider.type);
+    const registry = new DeviceRegistry(this.store);
     const devices = this.observed(project, machine, now).filter(
       (d) =>
         d.type === provider.type &&
+        // C-817: only devices a person enabled for this project.
+        deviceEnabledFor(registry.get(machine, d.type, d.id), project) &&
         !this.reservedElsewhere(
           project,
           machine,

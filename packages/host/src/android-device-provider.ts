@@ -1,4 +1,5 @@
 import {
+  DEVICE_ID_PATTERN,
   type DeviceObservation,
   type DeviceSessionContext,
   MAX_DEVICES_PER_PROVIDER,
@@ -121,6 +122,136 @@ export const ANDROID_DEVICE_PROBE_COMMAND = [
   ANDROID_DEVICE_PROBE_SCRIPT,
 ] as const;
 
+/**
+ * C-817: the fixed initialization a person's enable runs, as the project
+ * account, inside the same capability probe wrapper as the listing. It
+ * starts the same kind of throw-away adb server, waits for the one serial
+ * given as argv (never as code), then only changes three test settings and
+ * reads two values: stay awake on power, all animation scales off, lock
+ * screen off (`locksettings` refuses when a lock credential is set, so a
+ * person's PIN is never removed). No package is installed or removed, no
+ * reset, reboot or file transfer. Prints one JSON line with a fixed
+ * `result`; a failed step is named only by its key.
+ */
+export const ANDROID_DEVICE_INIT_STEPS = [
+  {
+    key: "stay_awake",
+    title: "插电常亮",
+    hint: "在设备的开发者选项里手动打开“不锁定屏幕”（插电时屏幕常亮）后重试",
+  },
+  {
+    key: "animations",
+    title: "关闭动画",
+    hint: "在开发者选项里把窗口、过渡、动画程序三项缩放手动设为“关闭”后重试",
+  },
+  {
+    key: "lock_screen",
+    title: "关闭锁屏",
+    hint: "设备设了锁屏密码时不能自动关闭：先在设备上把锁屏方式改为“无”，再重试",
+  },
+] as const;
+
+export const ANDROID_DEVICE_INIT_SCRIPT = `import json,os,socket,subprocess,sys,time
+serial=sys.argv[1].encode()
+deadline=time.monotonic()+8.5
+env=dict(os.environ,ADB_MDNS='0',ADB_EMU='0',ADB_MDNS_AUTO_CONNECT='0')
+for k in ('ANDROID_SERIAL','ADB_SERVER_SOCKET','ANDROID_ADB_SERVER_ADDRESS','ANDROID_ADB_SERVER_PORT','ADB_USB'): env.pop(k,None)
+s=socket.socket(); s.bind(('127.0.0.1',0)); port=s.getsockname()[1]; s.close()
+def left(): return deadline-time.monotonic()
+def recvn(c,n):
+ b=b''
+ while len(b)<n:
+  d=c.recv(n-len(b))
+  if not d: raise OSError()
+  b+=d
+ return b
+def send(c,p): c.sendall(b'%04x'%len(p)+p)
+def connect():
+ c=socket.create_connection(('127.0.0.1',port),max(0.1,min(1.0,left()))); c.settimeout(max(0.1,min(3.0,left()))); return c
+def state():
+ try:
+  c=connect()
+ except OSError:
+  return None
+ try:
+  send(c,b'host:devices')
+  if recvn(c,4)!=b'OKAY': return None
+  for l in recvn(c,int(recvn(c,4),16)).decode('utf-8','replace').splitlines():
+   r=l.split()
+   if len(r)>1 and r[0].encode()==serial: return r[1]
+  return ''
+ except (OSError,ValueError):
+  return None
+ finally:
+  c.close()
+def shell(cmd):
+ try:
+  c=connect()
+ except OSError:
+  return None
+ try:
+  send(c,b'host:transport:'+serial)
+  if recvn(c,4)!=b'OKAY': return None
+  send(c,b'shell:'+cmd.encode())
+  if recvn(c,4)!=b'OKAY': return None
+  out=b''
+  while len(out)<8192:
+   d=c.recv(4096)
+   if not d: break
+   out+=d
+  return out.decode('utf-8','replace').split()
+ except OSError:
+  return None
+ finally:
+  c.close()
+def zero(v):
+ try: return float(v)==0
+ except ValueError: return False
+STEPS=(
+ ('stay_awake','settings put global stay_on_while_plugged_in 7;settings get global stay_on_while_plugged_in',lambda o:o[-1:]==['7']),
+ ('animations',';'.join('settings put global %s 0'%k for k in ('window_animation_scale','transition_animation_scale','animator_duration_scale'))+';'+';'.join('settings get global %s'%k for k in ('window_animation_scale','transition_animation_scale','animator_duration_scale')),lambda o:len(o)>=3 and all(zero(v) for v in o[-3:])),
+ ('lock_screen','locksettings set-disabled true;locksettings get-disabled',lambda o:o[-1:]==['true']),
+)
+def report(**v): print(json.dumps(v),flush=True)
+server=subprocess.Popen(['adb','-P',str(port),'server','nodaemon'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env)
+try:
+ seen=None
+ while seen is None and left()>4 and server.poll() is None:
+  time.sleep(0.2); seen=state()
+ if seen is None: sys.exit(1)
+ settle=time.monotonic()+2.0
+ while left()>4 and seen!='device' and (time.monotonic()<settle or seen in ('connecting','authorizing')):
+  time.sleep(0.3); n=state(); seen=seen if n is None else n
+ if seen=='unauthorized': report(result='unauthorized')
+ elif seen!='device': report(result='not_found')
+ else:
+  for key,cmd,ok in STEPS:
+   out=shell(cmd)
+   if out is None or not ok(out):
+    report(result='failed',step=key); break
+  else:
+   info=shell('wm size;getprop ro.build.version.release') or []
+   size=[w for w in info if 'x' in w and w.replace('x','').isdigit()]
+   report(result='ok',resolution=size[0] if size else '',version=info[-1] if info else '')
+finally:
+ try:
+  c=connect(); send(c,b'host:kill'); c.close()
+ except OSError:
+  pass
+ try:
+  server.wait(timeout=max(0.1,min(1.0,left()+1)))
+ except subprocess.TimeoutExpired:
+  server.kill(); server.wait()
+`;
+
+export const ANDROID_DEVICE_INIT_COMMAND = [
+  "python3",
+  "-I",
+  "-B",
+  "-c",
+  ANDROID_DEVICE_INIT_SCRIPT,
+] as const;
+
 const STATES: Readonly<Record<string, DeviceObservation["state"]>> = {
   device: "available",
   unauthorized: "unauthorized",
@@ -183,6 +314,26 @@ export const androidDeviceProvider: HostDeviceProvider = {
         "关掉机器上常驻的 adb 服务（例如以前写死的固定端口），真机只交给 Run 自己的 adb 服务",
     },
   ],
+  init_steps: ANDROID_DEVICE_INIT_STEPS,
+  async initialize({ execution, os, probe, signal }, device) {
+    if (
+      device.type !== ANDROID_DEVICE_TYPE ||
+      !DEVICE_ID_PATTERN.test(device.id)
+    )
+      return undefined;
+    const result = await probe(
+      execution,
+      os,
+      [...ANDROID_DEVICE_INIT_COMMAND, device.id],
+      signal,
+    );
+    if (!result.ok) return undefined;
+    try {
+      return JSON.parse(result.output) as unknown;
+    } catch {
+      return undefined;
+    }
+  },
   async list({ execution, os, probe, signal }) {
     const result = await probe(
       execution,

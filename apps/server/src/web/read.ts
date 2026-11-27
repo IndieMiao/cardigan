@@ -1836,6 +1836,10 @@ export function needsYou(
           }
         : {}),
       helper_checks: action.helper_checks,
+      // C-817: host-authored enable prompt; answered via the device endpoint.
+      ...(stored?.status === "open" && stored.device_enablement
+        ? { device_enablement: stored.device_enablement }
+        : {}),
       ...(action.handoff
         ? {
             handoff: helper

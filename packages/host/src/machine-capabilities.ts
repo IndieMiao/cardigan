@@ -27,6 +27,11 @@ import {
   type AgentToolsOutcome,
   reconcileAgentToolsAction,
 } from "./agent-tools-maintenance.js";
+import {
+  observeProviderDevices,
+  syncDeviceActions,
+  syncDeviceActionsEverywhere,
+} from "./device-enablement.js";
 import { heldDevices } from "./device-leases.js";
 import {
   DEVICE_PROVIDERS,
@@ -128,6 +133,7 @@ export async function refreshMachineObservations(
   let targetFingerprint: string | undefined;
   let checkedTarget: ObservationTarget | undefined;
   let readiness: ReadinessOutcome | undefined;
+  let devicesChanged = false;
   try {
     const target = await options.target();
     const binding = JSON.stringify([
@@ -258,6 +264,30 @@ export async function refreshMachineObservations(
         heldDevices(store, machine, provider.type),
       );
       devices = [...(devices ?? []), ...listed];
+      // C-817: register new devices, run initializations a person asked for,
+      // and offer only devices enabled for this project as capabilities.
+      let enabled: readonly DeviceObservation[] = [];
+      try {
+        const outcome = await observeProviderDevices({
+          store,
+          project,
+          machine,
+          provider,
+          listed,
+          complete: !!raw,
+          target: {
+            execution: target.execution,
+            os: target.machine.os,
+            probe,
+            ...(options.signal ? { signal: options.signal } : {}),
+          },
+          now,
+        });
+        enabled = outcome.enabled;
+        if (outcome.changed) devicesChanged = true;
+      } catch {
+        // The registry never fails the machine check; nothing is offered.
+      }
       if (!raw)
         failures.push({
           key: provider.type,
@@ -265,7 +295,7 @@ export async function refreshMachineObservations(
           reason: `无法列出${provider.label}`,
         });
       const verified_at = now();
-      for (const key of deviceCapabilities(listed))
+      for (const key of deviceCapabilities(enabled))
         capabilities.push({
           key,
           version: null,
@@ -367,6 +397,14 @@ export async function refreshMachineObservations(
       // A failed timeline write never invalidates the recorded observation.
     }
   }
+  // C-817: Needs You device to-dos follow the registry and this listing.
+  if (recorded)
+    try {
+      if (devicesChanged) syncDeviceActionsEverywhere(store, machine, { now });
+      else syncDeviceActions(store, project, machine, { now });
+    } catch {
+      // A failed to-do write never invalidates the recorded observation.
+    }
   const owns = () =>
     readMachineObservationsInTransaction(store, project, machine, now()).health
       ?.evidence_ref === `machine-observation:${observation}`;
