@@ -1499,6 +1499,13 @@ function CardToCloseRow({
     />
   );
 }
+/** C-822: the server's answer; older servers fall back to the C-742 rule. */
+function actionHandler(item: NeedsAction): NonNullable<NeedsAction["handler"]> {
+  if (item.handler) return item.handler;
+  if (item.completion_notice !== undefined) return "owner";
+  if (item.executor === "operator") return "operator";
+  return item.triage === "host" ? "host" : "owner";
+}
 function HumanAction({
   item,
   client,
@@ -1512,7 +1519,7 @@ function HumanAction({
   >("");
   const action = useAction(done);
   // C-742: 张良's actions can be viewed and taken back, never completed here.
-  const operator = item.executor === "operator";
+  const handler = actionHandler(item);
   if (item.completion_notice !== undefined)
     return (
       <NeedsRow
@@ -1544,7 +1551,7 @@ function HumanAction({
       }
       title={
         <>
-          {item.triage === "host" ? "主机操作：" : ""}
+          {handler === "host" ? "主机操作：" : ""}
           {item.handoff?.title ?? item.triage_rationale ?? item.why}
         </>
       }
@@ -1572,9 +1579,9 @@ function HumanAction({
           label={
             item.last_loss_observation
               ? "已记录：无法确认"
-              : operator
+              : handler === "operator"
                 ? "待张良执行"
-                : item.triage === "host"
+                : handler === "host"
                   ? item.host_operator === "external"
                     ? "待外接操作员"
                     : "待主机操作"
@@ -1583,7 +1590,7 @@ function HumanAction({
         />
       }
       action={
-        item.triage === "host" || operator ? (
+        handler !== "owner" ? (
           <NeedsOpenAction name={`查看 ${item.id}`} secondary>
             查看
           </NeedsOpenAction>
@@ -1699,7 +1706,7 @@ function HumanAction({
           prompt={item.device_enablement}
           done={done}
         />
-      ) : operator ? (
+      ) : handler === "operator" ? (
         <Button
           data-needs-focus=""
           disabled={action.busy}
@@ -2107,15 +2114,12 @@ function NeedsContent({
   // folded group and never count as waiting on the human.
   // C-742: 张良's open actions are listed apart and never count as the
   // owner's; unclaimed completion notices stay with the owner's actions.
-  const forOperator = (a: NeedsAction) =>
-    a.executor === "operator" && a.completion_notice === undefined;
-  const operator = (data?.human_actions ?? []).filter(forOperator);
-  const mine = (data?.human_actions ?? []).filter(
-    (a) => !forOperator(a) && a.triage !== "host",
-  );
-  const host = (data?.human_actions ?? []).filter(
-    (a) => !forOperator(a) && a.triage === "host",
-  );
+  // C-822: the server says who handles each action; every count reads it.
+  const handled = (handler: NonNullable<NeedsAction["handler"]>) =>
+    (data?.human_actions ?? []).filter((a) => actionHandler(a) === handler);
+  const operator = handled("operator");
+  const mine = handled("owner");
+  const host = handled("host");
   const proposals = data?.story_proposals ?? [];
   const toClose = data?.cards_to_close ?? [];
   const total = data
@@ -2124,7 +2128,8 @@ function NeedsContent({
       mine.length +
       toClose.length +
       data.incidents.length +
-      (data.attention?.length ?? 0)
+      (data.attention?.length ?? 0) +
+      (data.system_rule_attention?.length ?? 0)
     : 0;
   const blocking = (data?.decisions ?? []).filter(
     (q) => q.blocking && !q.followup_notice && !isMergeConfirmation(q),

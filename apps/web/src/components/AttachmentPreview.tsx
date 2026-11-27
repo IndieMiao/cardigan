@@ -3,6 +3,7 @@ import type { AttachmentView } from "../api.js";
 import { AttachmentCaption, attachmentName } from "./AttachmentCaption.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
 import { Lightbox } from "./Lightbox.js";
+import { AttachmentThumb } from "./layout/AttachmentTileLayout.js";
 import { ImageUnavailableIcon } from "./ui/icons.js";
 
 export const isBitmap = (a: AttachmentView) =>
@@ -11,9 +12,12 @@ export const isBitmap = (a: AttachmentView) =>
 export function AttachmentPreview({
   attachment,
   images,
+  compact = false,
 }: {
   attachment: AttachmentView;
   images: readonly AttachmentView[];
+  /** A small square in a line of text (a system line's upload). */
+  compact?: boolean;
 }) {
   const initial = images.findIndex((image) => image.id === attachment.id);
   const [open, setOpen] = useState(false),
@@ -57,9 +61,8 @@ export function AttachmentPreview({
         ),
       }))}
       trigger={
-        <button
-          type="button"
-          className="attachment-preview"
+        <AttachmentThumb
+          compact={compact}
           aria-label={`预览 ${attachmentName(attachment)}`}
         >
           {thumbnail && failed !== thumbnail ? (
@@ -72,7 +75,7 @@ export function AttachmentPreview({
           ) : (
             <ImageUnavailableIcon />
           )}
-        </button>
+        </AttachmentThumb>
       }
     />
   );

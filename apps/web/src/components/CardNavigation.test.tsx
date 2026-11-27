@@ -165,14 +165,16 @@ test("U5b attachment grid retains true metadata, only previews bitmaps and resto
       ]}
     />,
   );
-  expect(screen.getByText("未命名的 tester")).toBeTruthy();
-  expect(screen.getByText("所有者")).toBeTruthy();
+  // C-820: the uploader is a small avatar; its name is the accessible name.
+  expect(screen.getByRole("img", { name: "未命名的 tester" })).toBeTruthy();
+  expect(screen.getByRole("img", { name: "所有者" })).toBeTruthy();
   expect(document.querySelector("time")?.dateTime).toBe(when);
   expect(screen.getAllByText("1.2 KiB")).toHaveLength(5);
-  expect(document.querySelectorAll(".attachment-preview img")).toHaveLength(2);
-  expect(
-    document.querySelector(".attachment-preview img")?.getAttribute("loading"),
-  ).toBe("lazy");
+  const thumbs = screen
+    .getAllByRole("button", { name: /^预览 / })
+    .flatMap((button) => [...button.querySelectorAll("img")]);
+  expect(thumbs).toHaveLength(2);
+  expect(thumbs[0]?.getAttribute("loading")).toBe("lazy");
   expect(screen.queryByRole("button", { name: "预览 F-3" })).toBeNull();
   expect(screen.queryByRole("button", { name: "预览 F-4" })).toBeNull();
   expect(screen.getByText("已取代的附件（1）").closest("details")?.open).toBe(

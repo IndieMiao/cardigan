@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import {
   type ActionCommand,
+  alternativeCapabilities,
   type DeviceObservation,
   deviceCapabilities,
   type Machine,
@@ -303,6 +304,15 @@ export async function refreshMachineObservations(
         });
     }
     if (devices) health = { ...health, devices };
+    // C-815: an alternative (安卓设备任一) holds once any option was verified.
+    for (const key of alternativeCapabilities(capabilities.map((c) => c.key)))
+      if (!capabilities.some((c) => c.key === key))
+        capabilities.push({
+          key,
+          version: null,
+          verified_at: now(),
+          evidence_ref: `machine-observation:${observation}#${key}`,
+        });
     if (failures.length) health = { ...health, capability_failures: failures };
     const observe =
       options.readiness ?? (options.catalog === undefined && observeReadiness);

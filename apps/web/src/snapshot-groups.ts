@@ -1,3 +1,4 @@
+import { waitsOnOwner } from "@cardigan/domain";
 import type { CardView } from "./api.js";
 
 export const SNAPSHOT_GROUPS = [
@@ -19,9 +20,7 @@ export function inSnapshotGroup(
     case "human":
       return (
         card.next_owners.some((o) => o.kind === "human") ||
-        card.waiting_on.some(
-          (w) => w.kind === "decision" || w.kind === "human_action",
-        )
+        card.waiting_on.some(waitsOnOwner)
       );
     case "agent":
       return card.next_owners.some(

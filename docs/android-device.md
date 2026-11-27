@@ -98,6 +98,27 @@ Run 拿到设备时的环境：
 | 只有真机 | 真机序列号 | `CARDIGAN_DEVICE_SERIAL` |
 | 两者都有 | 模拟器（`emulator-<端口>`） | `CARDIGAN_EMULATOR_SERIAL`、`CARDIGAN_DEVICE_SERIAL`；操作真机写 `adb -s $CARDIGAN_DEVICE_SERIAL` |
 
+### 安卓设备任一（`android.any`，C-815）
+
+不在乎模拟器还是真机的工作（tester、实测和取证类工作项默认如此）写 `android.any`：
+
+- 机器上验证过模拟器（`android.emulator`）或有可用真机（`android.device`）就具备 `android.any`。
+- 派发时哪个空闲用哪个：都空闲时先用模拟器，模拟器名额占满时用真机；两类都忙时排队，哪个先空出来用哪个。独占、释放、名额、预约都和直接要求那一类相同，Run 的 `resource_keys` 记 `android.any` 加实际分到的那一类。
+- 分到哪一类看 `ANDROID_SERIAL`：`emulator-` 开头是模拟器，否则是真机（也在 `CARDIGAN_DEVICE_SERIAL`）。环境与上表“只有模拟器”“只有真机”相同。
+- 只有明确需要模拟器（快照、冷启动、指定手机分辨率）才写 `android.emulator`，明确需要真机才写 `android.device`；写了具体类型的工作项不受 `android.any` 影响。
+- `run-capacity.yaml` 不用为 `android.any` 单独配名额（也可以配，作为两类合计的上限）；`adb_slots.resources` 照常列 `android.emulator`、`android.device`。
+
+真机和模拟器的差异（Run 的能力说明里自带，项目可以用 `cardigan capability guide set` 写自己的 `android.any` 说明替换）：
+
+| | 模拟器 | 真机（mac-mini 上的华为 MRR-W39 平板） |
+|---|---|---|
+| 系统 | 原生安卓镜像 | HarmonyOS 4.2（兼容 Android 12，API 31），厂商系统界面和权限弹窗 |
+| 架构 | 镜像决定（可有 x86_64） | arm64-v8a |
+| 分辨率 | 按镜像配置（手机分辨率） | 1600x2560、400dpi |
+| 快照、冷启动 | 有 | 没有；回到干净状态只能卸载重装或 `adb shell pm clear <包名>` |
+| 启动和关闭 | Run 用 `-port $CARDIGAN_EMULATOR_PORT` 启动，Run 结束时系统关闭 | 一直开着、插电不熄屏；不要重启、关机或改系统设置、锁屏、USB 授权 |
+| 访问主机 | `10.0.2.2` | 没有这个地址 |
+
 持有真机的 Run 第一条 adb 命令前先执行 `adb --one-device $CARDIGAN_DEVICE_SERIAL start-server`，只占用分到的那一台（同一机器接了多台真机时，不加这一步会把其它真机也占住）。角色提示里已写明。
 
 ## 排障

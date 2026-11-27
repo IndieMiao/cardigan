@@ -154,7 +154,11 @@ test("an image chip previews the C-614 preview image and falls back to the local
       detail={cardDetail({ timeline: [entry], attachments: [withPreview] })}
     />,
   );
-  fireEvent.click(screen.getByRole("link", { name: /shot\.png/u }));
+  // The chip in the body, not the attachment tile's download button (C-820).
+  const chip = screen
+    .getAllByRole("link", { name: /shot\.png/u })
+    .find((link) => link.hasAttribute("data-attachment-ref"));
+  fireEvent.click(chip as HTMLElement);
   const image = within(await screen.findByRole("dialog")).getByRole("img", {
     name: "附件 shot.png",
   });

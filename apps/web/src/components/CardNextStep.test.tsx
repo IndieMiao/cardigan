@@ -734,6 +734,104 @@ test("a human action on a development card opens Needs You", () => {
   ).toBe("#/p/p%201/needs-you");
 });
 
+test.each([
+  ["operator", "交给张良"],
+  ["pm", "PM 处理中"],
+  ["host", "待主机操作"],
+] as const)(
+  "C-822: a human action handled by %s is not yours: “%s”, only 写评论",
+  (handler, step) => {
+    const { region, title, emphasis } = panel(
+      cardDetail({
+        card: {
+          ...card,
+          waiting_on: [
+            {
+              kind: "human_action",
+              ref: "H-132",
+              label: "等待",
+              handler,
+            },
+          ],
+          next_owners: [{ kind: "role", ref: "pm" }],
+        },
+        human_actions: [
+          {
+            id: "H-132",
+            instructions: "核对中转线路",
+            why_human: "",
+            expected_return: "",
+            status: "open",
+          },
+        ],
+      }),
+    );
+    expect(title).toBe(`${step}H-132`);
+    expect(title).not.toContain("等你执行");
+    expect(region.textContent).toContain("核对中转线路");
+    expect(emphasis).toHaveLength(0);
+    expect(within(region).queryByRole("link", { name: "处理人工事项" })).toBe(
+      null,
+    );
+    expect(within(region).getByRole("button", { name: "写评论" })).toBeTruthy();
+  },
+);
+
+test("C-822: your own action leads; 张良's is not counted as one more of yours", () => {
+  const detail = cardDetail({
+    card: {
+      ...card,
+      waiting_on: [
+        { kind: "human_action", ref: "H-1", label: "", handler: "operator" },
+        { kind: "human_action", ref: "H-2", label: "", handler: "owner" },
+      ],
+    },
+  });
+  expect(cardNextSteps(detail)).toMatchObject({
+    current: { kind: "human-action", item: { ref: "H-2" } },
+    more: 0,
+  });
+  // A decision PM decides does not wait on you either.
+  expect(
+    cardNextSteps(
+      cardDetail({
+        card: {
+          ...card,
+          waiting_on: [
+            { kind: "decision", ref: "Q-9", label: "", handler: "pm" },
+          ],
+          next_owners: [{ kind: "human", ref: "human" }],
+        },
+      }),
+    ).current.kind,
+  ).not.toBe("decision");
+});
+
+test("C-822: a general card lists each action under who handles it", () => {
+  const { region } = panel(
+    cardDetail({
+      card: {
+        ...card,
+        waiting_on: [
+          { kind: "human_action", ref: "H-50", label: "", handler: "owner" },
+          { kind: "human_action", ref: "H-51", label: "", handler: "operator" },
+        ],
+        next_owners: [{ kind: "human", ref: "human" }],
+      },
+      template: general,
+      mark_done: { allowed: true, reason: null },
+    }),
+  );
+  const line = (step: string) =>
+    [...region.querySelectorAll("div")].find((n) =>
+      n.firstChild?.textContent?.startsWith(step),
+    )?.textContent;
+  expect(line("等你执行")).toContain("H-50");
+  expect(line("等你执行")).not.toContain("H-51");
+  expect(line("交给张良")).toContain("H-51");
+  expect(line("交给张良")).not.toContain("H-50");
+});
+
 test("a general card asks you to mark it done, emphasised, with its human actions as links", () => {
   const markDone = vi.fn((emphasis: boolean) => (
     <button type="button" data-emphasis={emphasis}>

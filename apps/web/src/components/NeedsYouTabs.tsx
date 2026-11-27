@@ -26,6 +26,20 @@ const tabs = [
   ["later", "稍后"],
   ["notices", "知会"],
 ] as const;
+/**
+ * C-822: the working tabs show how many of their items are the owner's, the
+ * number the header and the sidebar badge add up; 交给张良, PM-held merges
+ * and host actions are listed under them but not counted.
+ */
+const ownerCounted: ReadonlySet<NeedsTab> = new Set([
+  "decisions",
+  "merges",
+  "actions",
+]);
+const tabCount = (
+  key: NeedsTab,
+  count: { readonly count: number; readonly attention: number },
+) => (ownerCounted.has(key) ? count.attention : count.count);
 export type NeedsCountsResource = ReturnType<typeof useResource<NeedsCounts>>;
 type PanelResource = ReturnType<typeof useResource<NeedsPage>>;
 type Props = {
@@ -129,7 +143,9 @@ function Tabs(props: Props & { counts: NeedsCountsResource }) {
               }}
             >
               <span>{label}</span>
-              <span className="needs-tab-count">{count?.count ?? "—"}</span>
+              <span className="needs-tab-count">
+                {count ? tabCount(key, count) : "—"}
+              </span>
               {!!count?.attention && (
                 <span className="visually-hidden">
                   ，{count.attention} 项待处理或未读

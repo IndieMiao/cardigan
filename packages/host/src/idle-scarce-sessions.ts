@@ -5,6 +5,7 @@ import {
   runsOf,
   sessionTurnEnded,
   untouchedQueuedRun,
+  withAllAlternatives,
 } from "@cardigan/domain";
 import type { ReadRepositories } from "@cardigan/store";
 import { assignmentResourceKeys } from "./run-resources.js";
@@ -58,7 +59,10 @@ export function idleScarceSessions(
     const launch = a.runtime_ref.launch_generation?.run_id ?? null;
     const keys = new Set<string>();
     try {
-      for (const k of assignmentResourceKeys(tx, state.project_id, a))
+      // C-815: an `android.any` session may take either of its options.
+      for (const k of withAllAlternatives(
+        assignmentResourceKeys(tx, state.project_id, a),
+      ))
         keys.add(k);
     } catch {
       // An unreadable stored requirement names nothing; held keys still do.

@@ -510,24 +510,6 @@ button.build-version[data-feedback] {
 .capacity-compact {
   display: none;
 }
-.capacity-tooltip {
-  z-index: 60;
-  width: min(380px, calc(100vw - 24px));
-  max-height: min(70dvh, var(--radix-popover-content-available-height));
-  overflow: auto;
-  overflow-wrap: anywhere;
-  padding: 16px;
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-.capacity-tooltip p {
-  margin: 8px 0 0;
-}
-.capacity-detail-row {
-  display: grid;
-  gap: 2px;
-  margin-top: 12px;
-}
 @media (max-width: 1000px) {
   .capacity-wide {
     display: none;
@@ -1795,32 +1777,6 @@ fieldset.filters {
   overflow-wrap: anywhere;
 }
 
-.attachments {
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.attachment {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-}
-
-.attachment-thumb {
-  max-width: 220px;
-  max-height: 160px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  object-fit: contain;
-  background: var(--surface);
-}
-
 .attachment-id {
   font-family: var(--font);
 }
@@ -2737,24 +2693,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .recent-conclusions a:hover {
   text-decoration: underline;
 }
-.attachment-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.attachment-grid > li {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font-size: var(--text-sm);
-}
 .attachment-preview,
 .attachment-file {
   display: flex;
@@ -2783,10 +2721,6 @@ body[data-lightbox="open"] .drawer-overlay {
 .system-line .attachment-preview {
   width: 40px;
   height: 40px;
-}
-.attachments .attachment-preview {
-  width: 180px;
-  height: 120px;
 }
 
 /* U6c: timeline prose, headings and secondary text use only three sizes. */
@@ -3256,35 +3190,6 @@ body[data-lightbox="open"] .drawer-overlay {
 }
 .request-feedback button {
   flex-shrink: 0;
-}
-
-/* §9 C-95: attachments a decision references, shown above its options. */
-.decision-attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  list-style: none;
-  margin: 8px 0 12px;
-  padding: 0;
-}
-.decision-attachments .attachment-preview {
-  width: 160px;
-  height: 104px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  cursor: zoom-in;
-}
-.decision-attachment-file {
-  display: inline-flex;
-  align-items: center;
-  max-width: 260px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface-muted);
-  font-size: var(--text-sm);
-  overflow-wrap: anywhere;
 }
 
 /* Fixed priority symbols share one palette across every card surface. */

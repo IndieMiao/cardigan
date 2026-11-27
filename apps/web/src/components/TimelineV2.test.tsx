@@ -261,7 +261,9 @@ test("attachment names and notes appear in comments and upload rows as plain tex
     ],
     [named, document, legacy],
   );
-  const attached = view.container.querySelector(".attachments") as HTMLElement;
+  const attached = view.container
+    .querySelector("[data-ui=attachment-tile]")
+    ?.closest("ul") as HTMLElement;
   expect(within(attached).getByText("截图.png")).toBeTruthy();
   expect(
     within(attached).getByText("<script>plain text</script>"),
@@ -432,7 +434,7 @@ test("C-95: an open decision shows referenced attachments in the card timeline; 
   expect(within(list).getByRole("button", { name: "预览 a.png" })).toBeTruthy();
   expect(
     within(list)
-      .getByRole("link", { name: "▤ notes.txt" })
+      .getByRole("link", { name: "下载 notes.txt" })
       .getAttribute("href"),
   ).toBe("/api/projects/p-1/attachments/F-2");
   view.rerender(content(plain.id));
@@ -496,4 +498,47 @@ test("human completion results render literally, including Markdown, references 
   expect(content?.textContent).toBe(body);
   expect(content?.querySelector("strong, a, img, script")).toBeNull();
   expect(content?.classList.contains("markdown")).toBe(false);
+});
+
+test("C-822: a human action's entries say who handles it now, as Needs You does", () => {
+  show([
+    timelineEntry({
+      id: "C-1#3",
+      event_seq: 3,
+      type: "human_action",
+      human_action_id: "H-1",
+      human_action_handler: "owner",
+      body: "请登录",
+    }),
+    timelineEntry({
+      id: "C-1#4",
+      event_seq: 4,
+      type: "human_action",
+      human_action_id: "H-2",
+      human_action_handler: "operator",
+      body: "交给张良：换会话",
+    }),
+    timelineEntry({
+      id: "C-1#5",
+      event_seq: 5,
+      type: "human_action",
+      human_action_id: "H-3",
+      human_action_handler: "done",
+      body: "已处理",
+    }),
+    timelineEntry({
+      id: "C-1#6",
+      event_seq: 6,
+      type: "human_action",
+      human_action_id: "H-4",
+      body: "旧服务器",
+    }),
+  ]);
+  const header = (id: string) =>
+    document.getElementById(`entry-${id}`)?.textContent ?? "";
+  expect(header("C-1#3")).toContain("待你执行于");
+  expect(header("C-1#4")).toContain("交给张良于");
+  expect(header("C-1#4")).not.toContain("待你执行");
+  expect(header("C-1#5")).toContain("人工事项已处理于");
+  expect(header("C-1#6")).toContain("人工事项于");
 });

@@ -21,6 +21,11 @@ export interface WaitingOnItem {
     | "已允许返工但未派发";
   /** Short human label, e.g. `等你拍板 Q-1`. */
   readonly label: string;
+  /**
+   * C-822: who acts on a decision or human action now (see
+   * `PendingHandler`); absent on review and blocked items.
+   */
+  readonly handler?: "owner" | "operator" | "pm" | "host" | "system";
 }
 
 export interface NextOwnerItem {

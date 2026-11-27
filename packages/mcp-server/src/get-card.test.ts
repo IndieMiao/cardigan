@@ -287,14 +287,29 @@ describe("get_card", () => {
     const payload = textOf(
       await client.callTool({ name: "get_card", arguments: { card_id } }),
     ) as {
-      waiting_on: Array<{ kind: string; ref: string; label: string }>;
+      waiting_on: Array<{
+        kind: string;
+        ref: string;
+        label: string;
+        handler?: string;
+      }>;
       next_owners: Array<{ kind: string; ref: string }>;
       why: string;
     };
 
     expect(payload.waiting_on).toEqual([
-      { kind: "decision", ref: "q(2)", label: "等待 PM 代拍 q(2)" },
-      { kind: "human_action", ref: "h(1)", label: "等你执行 h(1)" },
+      {
+        kind: "decision",
+        ref: "q(2)",
+        label: "等待 PM 代拍 q(2)",
+        handler: "pm",
+      },
+      {
+        kind: "human_action",
+        ref: "h(1)",
+        label: "等你执行 h(1)",
+        handler: "owner",
+      },
     ]);
     expect(payload.next_owners).toEqual([
       { kind: "role", ref: "pm" },

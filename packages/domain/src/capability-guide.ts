@@ -197,12 +197,50 @@ export function authorizeCapabilityGuideWrite(
   return { ok: true, value: actor.kind };
 }
 
+const DEVICE_DIFFERENCES = [
+  "真机与模拟器的差异：",
+  "- 快照：真机没有快照，不能加载或保存快照，也没有冷启动；回到干净状态只能卸载重装或清应用数据（adb shell pm clear <包名>）。",
+  "- 系统：真机可能是厂商系统（例如 HarmonyOS 的安卓兼容层），系统界面、权限弹窗和后台策略与原生安卓模拟器不同；系统版本和 API 以 adb shell getprop 为准。",
+  "- 架构：真机一般只有 arm64-v8a，只打 x86 或 x86_64 的包装不上。",
+  "- 分辨率与密度：以 adb shell wm size、adb shell wm density 为准；平板截图和手机分辨率截图不能互相替代。",
+  "- 启动与网络：模拟器由 Run 自己用 -port $CARDIGAN_EMULATOR_PORT 启动，Run 结束时系统关闭；真机一直开着，不要重启、关机，不要改系统设置、锁屏、开发者选项和 USB 授权。模拟器里的 10.0.2.2 指向主机，真机上没有这个地址。",
+  "- 证据：真机和模拟器的结果分开写，写明序列号和型号。",
+  "",
+  "目前接入的真机：mac-mini 上的华为 MRR-W39 平板，HarmonyOS 4.2（兼容 Android 12，API 31），arm64-v8a，1600x2560，400dpi，没有快照，插电不熄屏。",
+].join("\n");
+
+/**
+ * C-815: notes the host ships for capabilities whose use differs from what a
+ * session would assume. A project's own main note replaces them; machine
+ * supplements are added as usual. `android.emulator` deliberately has none,
+ * so emulator-only work items see exactly what they saw before.
+ */
+export const BUILTIN_CAPABILITY_NOTES: Readonly<Record<string, string>> =
+  Object.freeze({
+    "android.any": [
+      "本工作项要求“安卓设备任一”：系统把本机空闲的安卓模拟器或安卓真机分给本 Run，两类都忙时排队。看 ANDROID_SERIAL：emulator- 开头是模拟器，否则是真机（序列号也在 CARDIGAN_DEVICE_SERIAL）。真机不能替代模拟器的情况：要快照、冷启动、擦数据重来、指定手机分辨率或机型、x86 镜像；分到真机又需要这些时，如实写未覆盖，并请 PM 把要求改成 android.emulator。",
+      "",
+      DEVICE_DIFFERENCES,
+    ].join("\n"),
+    "android.device": [
+      "本工作项要求安卓真机：分到的真机序列号在 CARDIGAN_DEVICE_SERIAL（同一 Run 没有模拟器时也是 ANDROID_SERIAL）。真机没有快照、冷启动和手机分辨率，需要这些的测试不能用真机结果替代，如实写未覆盖。",
+      "",
+      DEVICE_DIFFERENCES,
+    ].join("\n"),
+  });
+
+export function builtinCapabilityNote(key: string): string | undefined {
+  return Object.hasOwn(BUILTIN_CAPABILITY_NOTES, key)
+    ? BUILTIN_CAPABILITY_NOTES[key]
+    : undefined;
+}
+
 /**
  * Merge capability × machine × project: each capability's main note with
  * the supplement for `machine_id`, plus every project-level note. With
  * `capabilities` given, exactly those keys are returned (null where nothing
- * is written); otherwise every key that has a main note or a supplement for
- * this machine.
+ * is written, or the built-in note of C-815); otherwise every key that has a
+ * main note or a supplement for this machine.
  */
 export function mergeCapabilityGuides(
   entries: readonly CapabilityGuideEntry[],
@@ -225,11 +263,14 @@ export function mergeCapabilityGuides(
   const keys = options.capabilities
     ? [...new Set(options.capabilities)]
     : [...new Set([...main.keys(), ...supplement.keys()])];
+  // C-815: a key asked for by name falls back to its built-in note.
+  const builtin = (key: string) =>
+    options.capabilities ? builtinCapabilityNote(key) : undefined;
   return {
     machine_id: machine,
     capabilities: keys.sort().map((key) => ({
       key,
-      usage_note: main.get(key) ?? null,
+      usage_note: main.get(key) ?? builtin(key) ?? null,
       machine_note: supplement.get(key) ?? null,
     })),
     project_notes: project.sort((a, b) =>

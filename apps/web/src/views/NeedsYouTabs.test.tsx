@@ -145,6 +145,50 @@ test("the App loads only counts outside Needs You and then only the selected tab
   expect(screen.getAllByRole("tab")).toHaveLength(5);
 });
 
+test("C-822: the sidebar badge, the header and the 待你执行 tab count only the owner's actions", async () => {
+  const action = actionPage.human_actions[0];
+  if (!action) throw new Error("missing action");
+  const page: NeedsPage = {
+    ...empty,
+    human_actions: [
+      { ...action, handler: "owner" },
+      {
+        ...action,
+        id: "H-118",
+        instructions: "张良：改锁定清单",
+        why: "张良：改锁定清单",
+        executor: "operator",
+        handler: "operator",
+      },
+    ],
+  };
+  const summary: NeedsCounts = {
+    ...blankCounts,
+    total_pending: 1,
+    tabs: { ...blankCounts.tabs, actions: { count: 2, attention: 1 } },
+  };
+  window.location.hash = "#/p/p-1/needs-you";
+  render(
+    <App
+      client={fakeClient({
+        needsYouCounts: async () => summary,
+        needsYouSection: async (_p: string, section: NeedsTab) =>
+          section === "actions" ? page : empty,
+      })}
+    />,
+  );
+  await screen.findByText("待你执行（1）");
+  expect(screen.getByText("交给张良（1）")).toBeTruthy();
+  expect(
+    within(tab("待你执行")).getByText("1", { selector: ".needs-tab-count" }),
+  ).toBeTruthy();
+  expect(screen.getByText("1 件事等你处理")).toBeTruthy();
+  const badges = [...document.querySelectorAll(".nav-count")].map(
+    (n) => n.textContent,
+  );
+  expect(badges).toEqual(["1"]);
+});
+
 test("tabs load on selection, preserve drafts and refresh only the active panel", async () => {
   const needsYouSection = vi.fn(async (_p: string, section: NeedsTab) =>
     section === "actions" ? actionPage : decisionPage,

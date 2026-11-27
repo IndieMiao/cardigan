@@ -104,6 +104,7 @@ export * from "./probe-config.js";
 export * from "./probe-service.js";
 export * from "./project-quotas.js";
 export * from "./repository-lock.js";
+export * from "./resource-alternatives.js";
 export * from "./resource-leases.js";
 export * from "./resource-probe.js";
 export * from "./retained-writer.js";

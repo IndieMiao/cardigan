@@ -6,7 +6,11 @@ import type {
   JsonValue,
   Run,
 } from "@cardigan/domain";
-import { awaitsStartPublication, runOccupiesSlot } from "@cardigan/domain";
+import {
+  awaitsStartPublication,
+  runOccupiesSlot,
+  withAllAlternatives,
+} from "@cardigan/domain";
 import {
   type ReadRepositories,
   type Store,
@@ -148,7 +152,10 @@ export class MachineLeases {
       !!this.config.adbSlots(a.machine_id) &&
       !!this.adb.applies(
         a.machine_id,
-        this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a)),
+        // C-815: `android.any` may resolve to an adb option on any Run.
+        withAllAlternatives(
+          this.store.uow.read((tx) => assignmentResourceKeys(tx, project, a)),
+        ),
       )
     );
   }
