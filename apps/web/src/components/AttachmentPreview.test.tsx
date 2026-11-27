@@ -88,3 +88,85 @@ test("C-614: the lightbox shows the preview route and falls back to the local or
       .getAttribute("src"),
   ).toBe(`${preview.preview_path}?local=1`);
 });
+
+test("C-820: the shared tile puts previews first, keeps one line of facts and opens the full note", async () => {
+  const note =
+    "截图 A 模拟器 Sensen_P0 原型 3f26e951d19a145628d81c4885f44b961c8754fd：默认 60° 倾斜，Streets 立体楼 + 光照（无阴影）+ 占位模型";
+  render(
+    <AttachmentGrid
+      attachments={[
+        attachment({
+          id: "F-7",
+          original_filename: "fix.patch",
+          mime: "text/x-patch",
+          inline: false,
+          thumbnail_path: null,
+          download_path: "/api/projects/p-1/attachments/F-7",
+        }),
+        { ...image, note, size: 1258291 },
+        attachment({
+          id: "F-8",
+          original_filename: "notes.txt",
+          mime: "text/plain",
+          inline: false,
+          thumbnail_path: null,
+          download_path: "/api/projects/p-1/attachments/F-8",
+        }),
+      ]}
+    />,
+  );
+  const tiles = document.querySelectorAll<HTMLElement>(
+    "[data-ui=attachment-tile]",
+  );
+  expect([...tiles].map((tile) => [tile.id, tile.dataset.kind])).toEqual([
+    ["attachment-F-1", "media"],
+    ["attachment-F-7", "file"],
+    ["attachment-F-8", "file"],
+  ]);
+  const [first, patch, text] = [...tiles] as [
+    HTMLElement,
+    HTMLElement,
+    HTMLElement,
+  ];
+  // Other files: a type strip instead of a preview, and no preview button.
+  expect(within(patch).queryByRole("button", { name: /^预览/ })).toBeNull();
+  expect(patch.querySelector("[data-attachment-media]")?.textContent).toBe(
+    "补丁",
+  );
+  expect(text.querySelector("[data-attachment-media]")?.textContent).toBe(
+    "文本",
+  );
+  // The download is an icon button named after the file, not a second name.
+  const download = within(first).getByRole("link", {
+    name: "下载 390-dark.png",
+  });
+  expect(download.getAttribute("href")).toBe(image.download_path);
+  expect(download.hasAttribute("download")).toBe(true);
+  expect(first.querySelector("[data-attachment-name]")?.textContent).toBe(
+    "390-dark.png",
+  );
+  expect(first.querySelector("[data-attachment-meta]")?.textContent).toContain(
+    "1.2 MiB",
+  );
+  // The note is clamped in the tile; pressing it shows the whole note.
+  const noteButton = within(first).getByRole("button", { name: note });
+  fireEvent.click(noteButton);
+  const panel = await screen.findByRole("dialog", {
+    name: "390-dark.png 的说明",
+  });
+  expect(within(panel).getByText(note)).toBeTruthy();
+  fireEvent.keyDown(panel, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  // Tiles without a note keep the same two-line slot, but nothing to press.
+  expect(within(patch).queryByRole("button", { name: /./ })).toBeNull();
+});
+
+test("C-820: decisions use the same attachment tile as the attachments tab", () => {
+  render(<DecisionAttachments attachments={[image]} />);
+  const list = screen.getByRole("list", { name: "拍板附件" });
+  const tile = within(list).getByRole("listitem");
+  expect(tile.dataset.ui).toBe("attachment-tile");
+  expect(
+    within(tile).getByRole("link", { name: "下载 390-dark.png" }),
+  ).toBeTruthy();
+});

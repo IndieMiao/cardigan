@@ -508,7 +508,9 @@ test("superseded attachments are collapsed", async () => {
   expect(details?.textContent).toContain("已取代的附件（1）");
   expect(details?.textContent).toContain("F-1");
   // The current attachment stays visible outside the collapsed block.
-  expect(comment?.querySelector(".attachments")?.textContent).toContain("F-2");
+  expect(
+    comment?.querySelector("#attachment-F-2")?.closest("details"),
+  ).toBeNull();
 });
 
 test("only existing server-resolved references become links", async () => {

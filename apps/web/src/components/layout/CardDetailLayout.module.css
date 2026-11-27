@@ -297,18 +297,6 @@
     color: var(--text-muted);
     cursor: pointer;
   }
-  .page :global(.attachment-grid) {
-    grid-template-columns: repeat(
-        auto-fit,
-        minmax(min(100%, var(--ui-menu-min)), 1fr)
-      );
-    gap: var(--ui-space-3);
-  }
-  .page :global(.attachment-grid > li) {
-    padding: var(--ui-space-3);
-    border-radius: var(--ui-panel-radius);
-    font-size: var(--ui-text-sm);
-  }
   .page :global(.work-item) {
     border-inline-start: var(--ui-stroke) solid var(--border);
   }

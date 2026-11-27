@@ -14,13 +14,6 @@
     "count": 1
   },
   {
-    "path": "components/AttachmentPreview.tsx",
-    "kind": "native-button",
-    "hash": "193f8711e2193ca5",
-    "text": "<button type=\"button\" className=\"attachment-preview\" aria-label={`预览 ${attachmentName(attachment)}`} >",
-    "count": 1
-  },
-  {
     "path": "components/BuildVersion.tsx",
     "kind": "native-button",
     "hash": "9100ed1862bdf461",

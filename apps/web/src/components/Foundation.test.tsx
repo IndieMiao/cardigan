@@ -397,7 +397,7 @@ test("U1 card uses shared tags and time without changing comment or attachment c
   ).toBeTruthy();
   expect(card.querySelector("time")?.title).toMatch(/GMT/);
   expect(card.querySelector(".comment-box")).toBeTruthy();
-  expect(card.querySelector(".attachment")).toBeTruthy();
+  expect(card.querySelector("[data-ui=attachment-tile]")).toBeTruthy();
 });
 
 test("U1 shell fixes the sidebar to the viewport and maps pass to the done colour", () => {

@@ -1,0 +1,224 @@
+@layer legacy, theme, base, components, utilities;
+@layer components {
+  /* Columns follow the container; `auto-fill` keeps a lone tile its width. */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(
+        auto-fill,
+        minmax(min(100%, var(--ui-attachment-tile)), 1fr)
+      );
+    gap: var(--ui-space-3);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  /* Two columns on a phone: the narrowest tile shrinks by a quarter. */
+  @media (max-width: 760px) {
+    .grid {
+      grid-template-columns: repeat(
+          auto-fill,
+          minmax(min(100%, calc(var(--ui-attachment-tile) * 0.75)), 1fr)
+        );
+      gap: var(--ui-space-2);
+    }
+  }
+  .flow {
+    margin-block: var(--ui-space-2) var(--ui-space-3);
+  }
+  /* Files follow the media on a row of their own, so rows never mix heights. */
+  .tile[data-kind="media"] + .tile[data-kind="file"] {
+    grid-column-start: 1;
+  }
+  .tile {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+    border: var(--ui-stroke) solid var(--border);
+    border-radius: var(--ui-panel-radius);
+    background: var(--surface);
+    font-size: var(--ui-text-sm);
+    line-height: var(--ui-leading);
+  }
+  .media {
+    display: flex;
+    flex: none;
+    height: var(--ui-attachment-thumb);
+    background: var(--surface-muted);
+    color: var(--text-muted);
+  }
+  .tile[data-kind="file"] > .media {
+    height: var(--ui-control-regular);
+  }
+  .media > :global(.ui-video-tile) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+  .thumb {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: zoom-in;
+  }
+  .thumb > img,
+  .media > :global(.ui-video-tile) > img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+  .thumb:focus-visible,
+  .media > :global(.ui-video-tile):focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: calc(-1 * var(--ui-focus-width) * 2);
+  }
+  /* A system line's upload: a small square beside the text. */
+  .thumbCompact {
+    flex: none;
+    width: calc(var(--ui-control-regular) + var(--ui-space-2));
+    height: calc(var(--ui-control-regular) + var(--ui-space-2));
+    border-radius: var(--ui-radius);
+    background: var(--surface-muted);
+    overflow: hidden;
+  }
+  .fileMark {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    padding-inline: var(--ui-space-2);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+    white-space: nowrap;
+  }
+  .fileMark > svg {
+    flex: none;
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+  }
+  .fileMark > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: var(--ui-space-1);
+    min-width: 0;
+    padding: var(--ui-space-1) var(--ui-space-1) var(--ui-space-2)
+      var(--ui-space-2);
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-1);
+    min-width: 0;
+  }
+  .name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+  }
+  .head > a {
+    flex: none;
+    color: var(--text-muted);
+  }
+  .head > a > svg {
+    width: var(--ui-icon);
+    height: var(--ui-icon);
+  }
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: var(--ui-space-2);
+    min-width: 0;
+    height: var(--ui-avatar-compact);
+    padding-inline-end: var(--ui-space-1);
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta > * {
+    flex: none;
+  }
+  /* Always two lines tall, so tiles with and without a note match. */
+  .note {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    min-height: calc(var(--ui-leading) * 2);
+    max-height: calc(var(--ui-leading) * 2);
+    margin: 0 var(--ui-space-1) 0 0;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+  }
+  .noteButton {
+    padding: 0;
+    border: 0;
+    border-radius: var(--ui-radius);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+  }
+  .noteButton:hover {
+    color: var(--text-muted);
+  }
+  .noteButton:focus-visible {
+    outline: var(--ui-focus-width) solid var(--ui-focus);
+    outline-offset: var(--ui-stroke);
+  }
+  .footer {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: var(--ui-text-xs);
+    line-height: var(--ui-leading-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Doubled with data-ui to win over the shared .ui-popover padding. */
+  .notePanel[data-ui="popover"] {
+    display: grid;
+    gap: var(--ui-space-2);
+    width: min(var(--ui-menu-max), calc(100vw - var(--ui-space-6)));
+    max-height: min(
+      var(--radix-popover-content-available-height),
+      calc(var(--ui-menu-max) * 1.5)
+    );
+    overflow-y: auto;
+    padding: var(--ui-space-3);
+    line-height: var(--ui-leading);
+    overflow-wrap: anywhere;
+  }
+  .noteHeading {
+    margin: 0;
+    font-weight: 600;
+  }
+  .noteText {
+    margin: 0;
+    white-space: pre-wrap;
+  }
+}

@@ -4,6 +4,7 @@ export {
   ChevronDown as ChevronDownIcon,
   ChevronRight as ChevronRightIcon,
   Copy as CopyIcon,
+  Download as DownloadIcon,
   Ellipsis as MoreHorizontalIcon,
   TriangleAlert as AlertIcon,
   X as CloseIcon,
