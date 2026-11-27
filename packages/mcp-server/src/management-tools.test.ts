@@ -884,6 +884,28 @@ test("C-751 tools/list: post_comment asks to name whoever must act", async () =>
   );
 });
 
+test("C-811 tools/list: request_decision asks for a plain 请你确认 title and attached images", async () => {
+  const tool = (await office.listTools()).tools.find(
+    (t) => t.name === "request_decision",
+  );
+  const properties = (tool?.inputSchema.properties ?? {}) as Record<
+    string,
+    { description?: string }
+  >;
+  for (const phrase of [
+    "请你确认：……",
+    "No card, delivery, commit or other internal IDs",
+    "put referenced IDs in context",
+  ])
+    expect(properties.question?.description).toContain(phrase);
+  for (const phrase of [
+    "screenshot or video",
+    "upload_attachment",
+    "only in context is not enough",
+  ])
+    expect(properties.attachment_ids?.description).toContain(phrase);
+});
+
 test("MCP assign accepts employee IDs/names, auto selects globally and whoami/read views resolve trusted identity", async () => {
   const employee = store.uow.run((tx) => {
     const e = {

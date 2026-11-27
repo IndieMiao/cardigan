@@ -10,6 +10,8 @@ import { describe, expect, test } from "vitest";
 import { composeRolePrompt } from "./prompt.js";
 import {
   corePromptFor,
+  DECISION_ATTACHMENT_RULE,
+  DECISION_QUESTION_RULE,
   DEFAULT_ROLE_KINDS,
   DEFAULT_ROLE_LAUNCH,
   type DefaultRoleId,
@@ -705,6 +707,31 @@ test("C-162: every default role says when request_human_action must hold the mer
             `- ${MERGE_RULE}`,
         `${role}: ${line}`,
       ).toBe(true);
+  }
+});
+
+test("C-811: every default role titles a decision 请你确认 in plain words and attaches what the owner must see", () => {
+  for (const phrase of [
+    "`question` 就是拍板标题",
+    "“请你确认：……”",
+    "不写卡片号、交付号、提交号等内部编号",
+    "要引用的编号写进 `context`",
+  ])
+    expect(DECISION_QUESTION_RULE).toContain(phrase);
+  for (const phrase of [
+    "看图、看视频",
+    "`attachment_ids` 挂在拍板上",
+    "`upload_attachment`",
+    "不要只在 `context` 里写附件编号或文件名",
+  ])
+    expect(DECISION_ATTACHMENT_RULE).toContain(phrase);
+  for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[]) {
+    expect(defaultRoleDefinition(role, launch).allowed_tools, role).toContain(
+      "request_decision",
+    );
+    const body = instructionsFor(role);
+    for (const rule of [DECISION_QUESTION_RULE, DECISION_ATTACHMENT_RULE])
+      expect(body.split(rule).length - 1, role).toBe(1);
   }
 });
 

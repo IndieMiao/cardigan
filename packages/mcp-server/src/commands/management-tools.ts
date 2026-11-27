@@ -336,7 +336,9 @@ const schemas = {
       ),
     kind: z.enum(["choose", "approve"]),
     category: z.enum(decisionCategories),
-    question: text,
+    question: text.describe(
+      "The decision title: open with one plain sentence 请你确认：…… saying what to confirm. No card, delivery, commit or other internal IDs and no API names here; put referenced IDs in context.",
+    ),
     context: text,
     options: z
       .array(z.object({ key: text, description: text, impact: text }))
@@ -362,7 +364,7 @@ const schemas = {
       .max(MAX_DECISION_ATTACHMENTS)
       .optional()
       .describe(
-        "Existing attachments on this card or affected_cards to show with the question, in display order",
+        "Existing attachments on this card or affected_cards to show with the question, in display order. When the owner must look at a screenshot or video to decide, attach it here (upload_attachment it to the card first if needed); naming an attachment ID or file name only in context is not enough.",
       ),
   },
   resolve_delegated_decision: {

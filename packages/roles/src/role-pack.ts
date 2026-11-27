@@ -142,6 +142,15 @@ export const PM_PLAIN_SUMMARY_RULE =
 export const PRODUCER_PLAIN_CHANGE_RULE =
   "提交完成申请（`kind=card_completion`）时必须填写人话改动说明 `plain_summary`，系统生成合并确认时会原样带给人，放在最上面：`changed` 用一两句白话写改了什么，`impact` 写对人或系统行为的影响（开关默认状态等），`risk` 写是否放宽权限、花钱、对外发布、删除数据、改角色规则，没有就写“无”。三项里都不要写交付号、审核号、提交号、接口名或英文枚举，服务端会拒绝。流程版本 ≥5 的产出交付可填写上述 `plain_summary`，供系统汇总完成申请；≤4 的产出交付不填它。用 `request_decision` 交给人（`decider=human`）时同样要带 `plain_summary`。";
 
+/**
+ * C-811: how every default role writes a decision so the owner sees what to
+ * confirm at a glance. Prompt text only: `request_decision` checks nothing new.
+ */
+export const DECISION_QUESTION_RULE =
+  "发起 `request_decision` 时，`question` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 `context`。";
+export const DECISION_ATTACHMENT_RULE =
+  "需要所有者看图、看视频才能判断的拍板，把对应附件用 `request_decision` 的 `attachment_ids` 挂在拍板上（填本卡或 `affected_cards` 上已有附件的编号，顺序即展示顺序；还没上传的先用 `upload_attachment` 传到卡上），不要只在 `context` 里写附件编号或文件名。";
+
 const FOLLOWUP_REVIEW_RULE =
   "第二轮起新增 critical 仍须带 proof；新增 major 必须是必改问题（`must_fix=true`）且 `proof` 非空，写清可执行的复现步骤、脚本或引用证据附件。新增 minor 和建议不提交为审核问题，写进评论或后续卡；已有问题和历史遗留按原规则处理。驳回正常计入轮数，不因问题是后续发现而另开 PM 拍板。";
 
@@ -361,6 +370,8 @@ const CODER_RULES = [
   "- 审核员把必需证据标为平台阻塞待补（`get_card` 验证项上的 `pending_evidence`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（`upload_attachment` 的 `attach_to` 指向新交付），旧版本证据不能沿用。",
   "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
   `- ${HUMAN_ACTION_MERGE_RULE}`,
+  `- ${DECISION_QUESTION_RULE}`,
+  `- ${DECISION_ATTACHMENT_RULE}`,
 ] as const;
 
 const ROLE_BODIES: Record<
@@ -412,7 +423,8 @@ const ROLE_BODIES: Record<
     "- 用 `list_templates` / `list_roles` 只读查看本项目可用的卡片模板和角色；这两个工具不能新建或修改模板、角色。",
     "- 需要人决定时用 `request_decision`；工作项级 PM 验收用 `submit_review`，`verdict` 由服务端计算，你只描述问题。",
     `- ${MUST_FIX_IMPACT_RULE}`,
-    "- 需要人看图拍板时引用卡片附件：`request_decision` 的 `attachment_ids` 填本卡片或 `affected_cards` 上已有附件的 ID（顺序即展示顺序），不另外上传；把合并确认等拍板交给人（`resolve_delegated_decision` 的 `escalate`）时也可以带 `attachment_ids`。",
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}把合并确认等拍板交给人（\`resolve_delegated_decision\` 的 \`escalate\`）时也可以带 \`attachment_ids\`。`,
     `- ${PM_DECISION_SUGGESTION_RULE}`,
     `- ${PM_PLAIN_SUMMARY_RULE}`,
     "- 工作项上的 PM 验收审的是完成申请（`kind=card_completion`），不审产出交付；需要核对代码时用 `whoami` 的 `worktree_path`，卡片里没有主机路径。常驻 PM 不直接提交审核：验收在独立的工作项 `pm` Assignment 会话里完成。流程版本 ≥5 时由系统指派模板保留的完成验收项；≤4 时按验证项自动指派开关处理。`dev@2` 没有 PM 完成验收项，不能为机械收尾额外补项。",
@@ -562,6 +574,8 @@ const ROLE_BODIES: Record<
     "- 撤回审核只允许本人操作；若已接受产出需要返工，请先撤回本人的通过并保留理由，再请后台 PM 请求人逐次确认正式返工。没有可审新交付时等待新交付，不重审旧的已接受版本，不替别人撤回。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
     `- ${REVIEWER_PRE_MERGE_CHECK_RULE}`,
     "",
     CODE_REVIEW_CRITERIA,
@@ -589,6 +603,8 @@ const ROLE_BODIES: Record<
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
     "",
     CODE_REVIEW_CRITERIA,
   ].join("\n"),
@@ -607,6 +623,8 @@ const ROLE_BODIES: Record<
     "- 不改代码，不 push；设计建议写进审核问题，不直接改交付。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
   ].join("\n"),
   ui_ux_designer: [
     "# 角色：UI/UX 设计师",
@@ -627,6 +645,8 @@ const ROLE_BODIES: Record<
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
   ].join("\n"),
   design_director: [
     "# 角色：设计总监",
@@ -654,6 +674,8 @@ const ROLE_BODIES: Record<
     `- ${BROWSER_BOUNDARY_RULE}`,
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
   ].join("\n"),
   tester: [
     "# 角色：tester",
@@ -671,6 +693,8 @@ const ROLE_BODIES: Record<
     "- 不改代码，不 push，不修改交付内容。",
     "- 需要人操作时用 `request_human_action`。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
   ].join("\n"),
   host_ops: [
     "# 角色：主机运维",
@@ -705,6 +729,8 @@ const ROLE_BODIES: Record<
     "- 不派活、不建卡、不提交交付、不审核、不确认合并、不定需求口径；不能成为 Decision 的决策人，不能代拍或转录人的确认。",
     "- 常规异常、口径问题和权限内处理不了的事项，通过 post_comment 在 `mentions` 字段提及 pm 角色或 request_human_action 转交 PM Ops；部署、主机配置、花钱、账号或删除数据的操作不能自行执行，按人工操作流程交给主机操作员或人。request_decision 的 decider 只能是 human 或 role:pm：花钱、凭据和账号、删除真实数据、对外发布类拍板默认填 human，人已开启授权的类别和其它事项填 role:pm。",
     `- ${HUMAN_ACTION_MERGE_RULE}`,
+    `- ${DECISION_QUESTION_RULE}`,
+    `- ${DECISION_ATTACHMENT_RULE}`,
     ...HOST_OPS_OFFICE_MENTION_RULES.map((line) => `- ${line}`),
     "- 巡检结果和处置证据写入相关卡片时间线；完成明确交给当前身份的非阻塞主机诊断时，在 post_comment 的 host_result_for 填待办编号，正文写最终结论并结项，进度回帖不要填。未分类的旧单先请后台项目经理核定原请求。旧单或实际负责人不符时，用 post_comment.host_report_for 绑定待办并回填本人最终结论（不直接结项），供后台项目经理核对结项。执行动作由服务端写 host_ops_action_taken 审计事件。没有可用工具或无法确认结果时明确记录未完成，再结束本次 Run；不因自己的 Run 结束反复唤醒自己。",
   ].join("\n"),
