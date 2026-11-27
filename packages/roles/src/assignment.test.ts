@@ -1414,3 +1414,40 @@ test("C-497 role and environment expose only this admission; no assigned device 
     compileAssignmentLaunch(input).env.CARDIGAN_RESOURCE_BINDINGS,
   ).toBeUndefined();
 });
+
+// C-823: every Claude launch trusts its exact cwd, worktree or run directory.
+test.each([
+  ["coder", WORK_DIR],
+  ["pm", RUN_DIR],
+] as const)(
+  "claude-code %s trusts its cwd locally and on a worker",
+  (roleId, cwd) => {
+    const input = {
+      assignment: { assignment_id: "A-1", run_id: "R-1" },
+      role: roleFor("claude-code", "example", roleId),
+      launch: parseLaunchConfig({
+        profiles: { example: { harness: "claude-code" } },
+      }),
+      mcp: { url: MCP_URL },
+      run_dir: RUN_DIR,
+      work_dir: cwd,
+      first_prompt: "fixture",
+      secrets: {},
+    };
+    const local = compileAssignmentLaunch(input).files.find((file) =>
+      file.path.endsWith("/launch.sh"),
+    );
+    expect(local?.content).toContain(
+      `"$claude_config_dir" '${cwd}'\nexec nice`,
+    );
+    expect(local?.content).toContain("hasTrustDialogAccepted");
+    const remote = compileAssignmentLaunch({
+      ...input,
+      worker_launch: { command: ["fixture-worker"], session_dir: "/s" },
+    }).files.find((file) => file.path.endsWith("/launch.json"));
+    expect(JSON.parse(remote?.content ?? "{}")).toMatchObject({
+      cwd,
+      trust_worktree: true,
+    });
+  },
+);

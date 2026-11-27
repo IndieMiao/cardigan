@@ -382,7 +382,10 @@ export function compileAssignmentLaunch(
                 env,
                 nice: agentNice,
                 cwd: input.work_dir,
-                trust_worktree: input.role.worktree !== "none",
+                // C-823: the worker trusts this cwd in a fresh Claude state
+                // for every generation, worktree or run directory alike. The
+                // key keeps its name so deployed worker helpers read it.
+                trust_worktree: true,
                 secret_keys: Object.keys(secretEnv),
               }),
               mode: 0o600,

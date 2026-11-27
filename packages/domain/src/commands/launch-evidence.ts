@@ -32,11 +32,32 @@ export interface LaunchEvidence {
     readonly tail: readonly string[];
     readonly resources?: LaunchResources | null | undefined;
   } | null;
+  /**
+   * C-823: the first-run confirmation the terminal is stopped at (named by
+   * the host from the redacted tail), so a launch that waits for a keypress
+   * is not reported only as a missing MCP handshake.
+   */
+  readonly startup_prompt?: StartupPrompt | undefined;
   /** Per-server connection result from the harness's own MCP logs. */
   readonly mcp_servers: readonly LaunchMcpServer[] | null;
   /** Bounded reason codes for each missing part; never a message. */
   readonly unavailable: Readonly<Record<string, string>>;
 }
+/** C-823: first-run confirmations an interactive CLI can stop at. */
+export const STARTUP_PROMPTS = {
+  trust_folder: "信任此文件夹",
+  theme: "选择主题",
+  security_notes: "安全须知",
+  api_key: "确认自定义 API key",
+  bypass_permissions: "确认跳过权限模式",
+  terminal_setup: "终端设置",
+  mcp_server_approval: "批准项目 MCP 服务器",
+  login: "选择登录方式",
+} as const;
+export type StartupPrompt = keyof typeof STARTUP_PROMPTS;
+const isStartupPrompt = (value: unknown): value is StartupPrompt =>
+  typeof value === "string" && Object.hasOwn(STARTUP_PROMPTS, value);
+
 export interface LaunchResources {
   readonly source: "scope" | "process";
   readonly cpu_ms: number;
@@ -75,6 +96,7 @@ function valid(e: LaunchEvidence): boolean {
     (e.harness === null || code(e.harness.replace("-", "_"))) &&
     (e.waited_ms === null || count(e.waited_ms)) &&
     [null, "pending", "listed", "missing"].includes(e.card_handshake) &&
+    (e.startup_prompt === undefined || isStartupPrompt(e.startup_prompt)) &&
     (t === null ||
       (["live", "finished"].includes(t.state) &&
         (t.exit_code === undefined ||
@@ -126,6 +148,11 @@ export function launchEvidenceSummary(run: RunId, e: LaunchEvidence): string {
           t.exit_code === undefined ? "" : `，退出码 ${t.exit_code}`
         }${t.exit_reason ? `（${t.exit_reason}）` : ""}`
       : `终端未取得（${e.unavailable.terminal ?? "unknown"}）`,
+    ...(e.startup_prompt
+      ? [
+          `终端停在首次确认框：${STARTUP_PROMPTS[e.startup_prompt]}（${e.startup_prompt}）`,
+        ]
+      : []),
     e.mcp_servers === null
       ? `MCP 结果未取得（${e.unavailable.mcp ?? "unknown"}）`
       : e.mcp_servers.length === 0

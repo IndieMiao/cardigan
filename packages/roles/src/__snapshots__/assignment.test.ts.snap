@@ -212,15 +212,78 @@ if [ -L "$claude_config_dir" ] || [ ! -d "$claude_config_dir" ] || [ ! -O "$clau
 fi
 # The extra leading zero clears inherited setgid on shared run directories.
 chmod 00700 -- "$claude_config_dir"
-# Claude Code 2.1.318 stores onboarding/trust in .claude.json, but theme and
-# bypass confirmation in settings.json. Seed fresh state as the runtime user;
-# noclobber prevents replacing a file created concurrently (or a symlink).
-if [ ! -e "$claude_config_dir/.claude.json" ] && [ ! -L "$claude_config_dir/.claude.json" ]; then
-  if [ ! -e "$claude_config_dir/settings.json" ] && [ ! -L "$claude_config_dir/settings.json" ]; then
-    (umask 077; set -C; printf '%s\\n' '{"theme":"dark","skipDangerousModePermissionPrompt":true,"autoMemoryEnabled":false}' > "$claude_config_dir/settings.json")
-  fi
-  (umask 077; set -C; printf '%s\\n' '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.318","projects":{"/srv/agent/worktrees/A-12":{"hasTrustDialogAccepted":true}}}' > "$claude_config_dir/.claude.json")
-fi
+# C-823: on every launch (new, resumed or replaced session) trust the exact
+# cwd in the Run's own Claude state, keeping everything else it holds; the
+# first launch also seeds onboarding, theme and bypass confirmation.
+'/usr/bin/python3' -IB -c 'import json, os, stat, sys
+directory, cwds = sys.argv[1], sys.argv[2:]
+def fail(message):
+    sys.stderr.write('\\''cardigan: '\\'' + message + '\\''\\n'\\'')
+    sys.exit(78)
+def load(name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        fail('\\''Claude '\\'' + name + '\\'' must be a regular file, not a symlink'\\'')
+    with os.fdopen(fd, '\\''rb'\\'') as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            fail('\\''Claude '\\'' + name + '\\'' must be a regular file, not a symlink'\\'')
+        raw = f.read(16 * 1024 * 1024)
+    try:
+        value = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        fail('\\''Claude '\\'' + name + '\\'' is not valid JSON'\\'')
+    if not isinstance(value, dict):
+        fail('\\''Claude '\\'' + name + '\\'' is not a JSON object'\\'')
+    return value
+def save(name, value, replace):
+    data = (json.dumps(value, indent=2) + '\\''\\n'\\'').encode()
+    temporary = '\\''.'\\'' + name + '\\''.cardigan-'\\'' + str(os.getpid())
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dirfd)
+    try:
+        with os.fdopen(fd, '\\''wb'\\'') as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if replace:
+            os.replace(temporary, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        else:
+            # Never replace a file another process created meanwhile.
+            os.link(temporary, name, src_dir_fd=dirfd, dst_dir_fd=dirfd, follow_symlinks=False)
+            os.unlink(temporary, dir_fd=dirfd)
+    except BaseException:
+        try:
+            os.unlink(temporary, dir_fd=dirfd)
+        except OSError:
+            pass
+        raise
+dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    try:
+        os.stat('\\''settings.json'\\'', dir_fd=dirfd, follow_symlinks=False)
+    except FileNotFoundError:
+        save('\\''settings.json'\\'', dict(theme='\\''dark'\\'', skipDangerousModePermissionPrompt=True, autoMemoryEnabled=False), False)
+    state = load('\\''.claude.json'\\'')
+    before = json.dumps(state, sort_keys=True)
+    state = state if state is not None else {}
+    state['\\''hasCompletedOnboarding'\\''] = True
+    state.setdefault('\\''lastOnboardingVersion'\\'', '\\''2.1.318'\\'')
+    projects = state.get('\\''projects'\\'')
+    if not isinstance(projects, dict):
+        projects = state['\\''projects'\\''] = {}
+    for cwd in cwds:
+        for path in dict.fromkeys([cwd, os.path.realpath(cwd)]):
+            entry = projects.get(path)
+            if not isinstance(entry, dict):
+                entry = projects[path] = {}
+            entry['\\''hasTrustDialogAccepted'\\''] = True
+    if json.dumps(state, sort_keys=True) != before:
+        save('\\''.claude.json'\\'', state, before != '\\''null'\\'')
+finally:
+    os.close(dirfd)
+' "$claude_config_dir" '/srv/agent/worktrees/A-12'
 exec nice -n 10 'claude' '--settings' '/srv/cardigan/runs/A-12/cardigan-assignment.claude-agent.claude-settings.json' '--model' 'opus' '--strict-mcp-config' '--mcp-config' '/srv/cardigan/runs/A-12/mcp.json' '--append-system-prompt-file' '/srv/cardigan/runs/A-12/core.md' '--allowedTools' 'mcp__card__whoami,mcp__card__get_card,mcp__card__get_updates,mcp__card__ack_events,mcp__card__submit_delivery' '--' "$first_message"
 ",
       "mode": "700",
