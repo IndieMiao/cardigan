@@ -159,9 +159,8 @@ test("approaching the lane bottom adds one batch, then the remainder and total, 
 
 test.each([
   ["q", "卡片"],
-  ["status", "in_progress"],
-  ["role", "coder"],
-  ["next", "agent"],
+  // C-816: status/role/next no longer filter the board; the type does.
+  ["template", "_custom"],
   ["overview", "progress"],
   ["sort", "id"],
   ["sort", "priority"],

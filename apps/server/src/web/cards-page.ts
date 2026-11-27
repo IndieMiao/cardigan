@@ -1,5 +1,9 @@
 import type { SQLInputValue } from "node:sqlite";
-import type { ProjectId } from "@cardigan/domain";
+import {
+  builtinCardTemplateVersions,
+  cardTemplate,
+  type ProjectId,
+} from "@cardigan/domain";
 import type { ReadRepositories, Store } from "@cardigan/store";
 import {
   missingPrecheckTargets,
@@ -28,6 +32,71 @@ const statuses = [
   "done",
   "cancelled",
 ];
+
+/** C-816: every custom, copied or unresolved template is one filter value.
+ * Template ids never start with "_", so it cannot collide with a real id. */
+export const CUSTOM_TEMPLATE_FILTER = "_custom";
+const builtinTemplateOrder = [
+  ...new Set(builtinCardTemplateVersions.map((t) => t.id)),
+];
+/** One `template@version` key per stored pair; a missing version binds v1. */
+const templateKeySql =
+  "COALESCE(json_extract(c.doc, '$.template'), '') || '@' || COALESCE(json_extract(c.doc, '$.template_version'), 1)";
+
+/**
+ * C-816: the card-type filter mirrors TemplateMarker. A card resolving to a
+ * builtin template is filtered by that template id and named by its title;
+ * everything else (project templates, unknown ids, no template) is "custom".
+ */
+function templateFilterIndex(
+  store: Store,
+  tx: ReadRepositories,
+  project: ProjectId,
+) {
+  const templates = tx.card_templates.list(project);
+  const kinds = new Map<string, { value: string; label: string }>();
+  const keys = new Map<string, string[]>();
+  for (const row of store.database
+    .prepare(
+      `SELECT DISTINCT json_extract(c.doc, '$.template') AS template, json_extract(c.doc, '$.template_version') AS version, ${templateKeySql} AS key FROM cards c WHERE c.project_id = ?`,
+    )
+    .all(project)) {
+    const id = typeof row.template === "string" ? row.template : undefined;
+    const version = typeof row.version === "number" ? row.version : undefined;
+    const resolved = id
+      ? cardTemplate(
+          {
+            template: id,
+            ...(version === undefined ? {} : { template_version: version }),
+          },
+          templates,
+        )
+      : undefined;
+    const option =
+      id && resolved?.builtin
+        ? { value: id, label: resolved.title }
+        : { value: CUSTOM_TEMPLATE_FILTER, label: "自定义或未知模板" };
+    if (!kinds.has(option.value)) kinds.set(option.value, option);
+    keys.set(option.value, [
+      ...(keys.get(option.value) ?? []),
+      String(row.key),
+    ]);
+  }
+  const rank = (value: string) => {
+    const index = builtinTemplateOrder.indexOf(value);
+    return value === CUSTOM_TEMPLATE_FILTER
+      ? Number.MAX_SAFE_INTEGER
+      : index < 0
+        ? builtinTemplateOrder.length
+        : index;
+  };
+  return {
+    options: [...kinds.values()].sort(
+      (a, b) => rank(a.value) - rank(b.value) || a.value.localeCompare(b.value),
+    ),
+    keys,
+  };
+}
 
 /** Explicit allowlist: new detail/check fields must not silently grow list rows. */
 export function cardSummary(card: CardListView) {
@@ -124,6 +193,7 @@ export function readCardsPage(
       params.get("role") || "",
       params.get("next") || "",
       params.get("overview") || "",
+      params.get("template") || "",
     ]);
   const scope = makeScope(selectedStatuses);
   const cursor = decodeCursor(params.get("cursor"), scope);
@@ -153,6 +223,12 @@ export function readCardsPage(
         "instr(lower(c.id || ' ' || json_extract(c.doc, '$.title')), ?) > 0",
       );
       args.push(q);
+    }
+    const templateIndex = templateFilterIndex(store, tx, project);
+    const template = params.get("template") || "";
+    if (template) {
+      where.push(inIds(templateKeySql));
+      args.push(JSON.stringify(templateIndex.keys.get(template) ?? []));
     }
     const role = params.get("role");
     if (role) {
@@ -345,6 +421,7 @@ export function readCardsPage(
         )
         .all(project)
         .map((r) => String(r.role)),
+      templates: templateIndex.options,
     };
   };
   return transaction ? read(transaction) : store.uow.read(read);

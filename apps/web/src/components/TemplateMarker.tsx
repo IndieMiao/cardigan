@@ -93,6 +93,22 @@ export function templateIdentity(
   };
 }
 
+/** C-816: custom, copied and unresolved templates share one filter value
+ * (template ids never start with "_"), matching the server's card filter. */
+export const CUSTOM_TEMPLATE_FILTER = "_custom";
+export function templateFilterOption(
+  card: Pick<CardView, "template" | "template_version">,
+  info?: CardTemplateInfo | null,
+): { value: string; label: string } {
+  const builtin =
+    info?.builtin === true &&
+    info.id === card.template &&
+    info.version === (card.template_version ?? 1);
+  return builtin && card.template
+    ? { value: card.template, label: info.title }
+    : { value: CUSTOM_TEMPLATE_FILTER, label: TEMPLATE_GLYPHS.custom.name };
+}
+
 export function TemplateMarker({
   card,
   info,
