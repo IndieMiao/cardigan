@@ -20,6 +20,7 @@ import {
   run,
 } from "../../domain/src/commands/test-fixtures.js";
 import type { AdbProbe } from "./adb-slot-probe.js";
+import { DeviceRegistry } from "./device-registry.js";
 import { launchDevices } from "./launch.js";
 import { resolveResourceAlternatives } from "./resource-alternatives.js";
 import { MachineLeases } from "./resource-leases.js";
@@ -107,6 +108,16 @@ function observe(
   keys: readonly string[],
   devices: readonly DeviceObservation[],
 ) {
+  // C-817: the listed devices were enabled for this project by a person.
+  const registry = new DeviceRegistry(store);
+  for (const d of devices) {
+    registry.discover("local", { ...d, state: "available" }, at);
+    store.database
+      .prepare(
+        "UPDATE machine_devices SET status='enabled', projects='[\"first\"]', initialized_at=? WHERE machine='local' AND type=? AND device=?",
+      )
+      .run(at, d.type, d.id);
+  }
   const actor = { kind: "system" as const, project_id: "first" };
   const id = `obs-${Math.random()}`;
   beginMachineObservation(store, actor, "first", "local", id, at);

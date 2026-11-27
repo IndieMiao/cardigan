@@ -1019,6 +1019,8 @@ test("C-815: 安卓设备任一 is provided by a verified emulator or a usable d
       async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
         if (command === ANDROID_DEVICE_PROBE_COMMAND)
           return { ok: true, output: JSON.stringify({ devices }) };
+        if (Array.isArray(command) && command[4] === ANDROID_DEVICE_INIT_SCRIPT)
+          return { ok: true, output: JSON.stringify({ result: "ok" }) };
         const binary = Array.isArray(command) ? command[0] : undefined;
         return binary && installed.has(binary)
           ? { ok: true, output: `${binary} 36.1.9` }
@@ -1062,6 +1064,18 @@ test("C-815: 安卓设备任一 is provided by a verified emulator or a usable d
       "android.sdk",
     ]);
     devices = [{ serial: "WGC6R21609003324", state: "device" }];
+    // C-817: an authorized device counts only once a person enabled it.
+    expect(keys(await refreshMachineObservations(options))).toEqual([
+      "android.sdk",
+    ]);
+    new DeviceRegistry(store).request({
+      machine: "local",
+      type: "android.device",
+      id: "WGC6R21609003324",
+      request: "enable",
+      projects: ["a"],
+      now: options.now(),
+    });
     expect(keys(await refreshMachineObservations(options))).toEqual([
       "android.any",
       "android.device",
