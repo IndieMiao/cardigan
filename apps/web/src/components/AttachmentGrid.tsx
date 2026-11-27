@@ -4,7 +4,7 @@ import { attachmentRefKind, formatBytes } from "../attachment-refs.js";
 import { attachmentName } from "./AttachmentCaption.js";
 import { AttachmentPreview, isBitmap } from "./AttachmentPreview.js";
 import { EmployeeIdentity } from "./EmployeeIdentity.js";
-import { StatusTag, Time } from "./Foundation.js";
+import { fullTime, StatusTag, Time } from "./Foundation.js";
 import {
   AttachmentFileMark,
   AttachmentTile,
@@ -77,19 +77,26 @@ function AttachmentCard({
         )
       }
       name={attachmentName(a)}
-      meta={
+      uploader={
+        <EmployeeIdentity
+          {...a}
+          author={a.uploaded_by}
+          author_role={a.uploader_role}
+          avatarOnly
+          avatarSize={24}
+        />
+      }
+      facts={
         <>
-          <EmployeeIdentity
-            {...a}
-            author={a.uploaded_by}
-            author_role={a.uploader_role}
-            avatarOnly
-            avatarSize={24}
-          />
           <Time value={a.uploaded_at} />
           <span>{formatBytes(a.size)}</span>
         </>
       }
+      factsTip={`${
+        a.uploaded_at && Number.isFinite(Date.parse(a.uploaded_at))
+          ? `上传于 ${fullTime(a.uploaded_at)}`
+          : "时间未知"
+      } · ${formatBytes(a.size)}`}
       note={a.note}
       download={a.download_path}
       footer={

@@ -12,12 +12,16 @@
     padding: 0;
     list-style: none;
   }
-  /* Two columns on a phone: the narrowest tile shrinks by a quarter. */
+  /* Two columns on a phone: the narrowest tile loses one --ui-space-4 and is
+     still wide enough for the facts line (avatar, time, size). */
   @media (max-width: 760px) {
     .grid {
       grid-template-columns: repeat(
           auto-fill,
-          minmax(min(100%, calc(var(--ui-attachment-tile) * 0.75)), 1fr)
+          minmax(
+            min(100%, calc(var(--ui-attachment-tile) - var(--ui-space-4))),
+            1fr
+          )
         );
       gap: var(--ui-space-2);
     }
@@ -154,16 +158,25 @@
     gap: var(--ui-space-2);
     min-width: 0;
     height: var(--ui-avatar-compact);
-    padding-inline-end: var(--ui-space-1);
     color: var(--text-muted);
     font-size: var(--ui-text-xs);
     line-height: var(--ui-leading-xs);
     white-space: nowrap;
-    overflow: hidden;
     font-variant-numeric: tabular-nums;
   }
   .meta > * {
     flex: none;
+  }
+  /* Time and size: cut with an ellipsis if a tile is ever too narrow; the
+     tooltip has both in full. */
+  .meta > .facts {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .facts > * + * {
+    margin-inline-start: var(--ui-space-1);
   }
   /* Always two lines tall, so tiles with and without a note match. */
   .note {

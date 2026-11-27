@@ -305,6 +305,71 @@ try {
       );
       await record(`timeline-${suffix}`);
     }
+  // V-3568: the facts line (avatar, time, size) must never be cut without
+  // an ellipsis. Sweep the widths between phone and desktop on both tabs.
+  const sweep = [];
+  const clipped = () =>
+    run(() =>
+      [...document.querySelectorAll("[data-attachment-meta]")]
+        .filter((e) => !e.closest("[hidden]"))
+        .map((e) => {
+          const facts = e.lastElementChild;
+          return {
+            meta: [e.scrollWidth, e.clientWidth],
+            facts: facts && [facts.scrollWidth, facts.clientWidth],
+            tile: Math.round(
+              e.closest("[data-ui=attachment-tile]").getBoundingClientRect()
+                .width,
+            ),
+          };
+        }),
+    );
+  for (const width of [
+    390, 414, 420, 430, 480, 520, 560, 600, 640, 680, 700, 720, 740, 760, 761,
+    800, 1024, 1440,
+  ]) {
+    await open(width, "light", "#/p/p-1/cards/C-1");
+    await until("!!document.querySelector('[role=tab]')");
+    for (const [label, name] of [
+      ["附件", "attachments"],
+      ["时间线", "timeline"],
+    ]) {
+      await tab(label);
+      await until(
+        `!!document.querySelector('[data-card-panel][id$=${name}]:not([hidden]) [data-attachment-meta]')`,
+      );
+      await settle();
+      const rows = await clipped();
+      const cut = rows.filter((r) => r.meta[0] > r.meta[1]);
+      const ellipsis = rows.filter((r) => r.facts && r.facts[0] > r.facts[1]);
+      sweep.push({
+        width,
+        tab: name,
+        tiles: rows.length,
+        narrowestTile: Math.min(...rows.map((r) => r.tile)),
+        metaClipped: cut.length,
+        factsEllipsized: ellipsis.length,
+      });
+      assert.equal(cut.length, 0, `${name} ${width}: facts line clipped`);
+      if (
+        (width === 760 && name === "attachments") ||
+        (width === 430 && name === "timeline")
+      ) {
+        if (name === "timeline")
+          await run(() =>
+            document
+              .querySelector(
+                "[data-card-panel][id$=timeline]:not([hidden]) [aria-label=拍板附件]",
+              )
+              .closest("li")
+              .scrollIntoView({ block: "start" }),
+          );
+        else await run(() => window.scrollTo(0, 0));
+        await settle();
+        await shot(`sweep-${name}-${width}-light.png`);
+      }
+    }
+  }
   assert.deepEqual(browser.errors, []);
 
   await send("Emulation.setDeviceMetricsOverride", {
@@ -354,6 +419,7 @@ try {
   const diffs = {};
   if (before) {
     for (const name of Object.keys(shots)) {
+      if (name.startsWith("sweep-")) continue;
       const old = (await readFile(resolve(before, name))).toString("base64");
       diffs[name] = await canvas(
         `const [a, b] = imgs; if (a.width !== b.width || a.height !== b.height) return "size";
@@ -382,6 +448,7 @@ try {
         viewport: "1440x1000 / 390x1000, DPR 1",
         data: "c820-fixture.tsx: 1 card, 8 attachments (6 PNG, 1 patch, 1 text), 2 comments, 1 open decision naming 3 attachments",
         cases: results,
+        sweep,
         diffs,
       },
       null,

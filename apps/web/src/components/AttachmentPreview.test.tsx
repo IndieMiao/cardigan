@@ -146,9 +146,11 @@ test("C-820: the shared tile puts previews first, keeps one line of facts and op
   expect(first.querySelector("[data-attachment-name]")?.textContent).toBe(
     "390-dark.png",
   );
-  expect(first.querySelector("[data-attachment-meta]")?.textContent).toContain(
-    "1.2 MiB",
-  );
+  // V-3568: avatar, then one shrinkable span with time and size.
+  const meta = first.querySelector("[data-attachment-meta]");
+  expect(meta?.children).toHaveLength(2);
+  expect(meta?.lastElementChild?.textContent).toContain("时间未知");
+  expect(meta?.lastElementChild?.textContent).toContain("1.2 MiB");
   // The note is clamped in the tile; pressing it shows the whole note.
   const noteButton = within(first).getByRole("button", { name: note });
   fireEvent.click(noteButton);

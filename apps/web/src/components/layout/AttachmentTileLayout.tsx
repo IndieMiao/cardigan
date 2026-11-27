@@ -44,7 +44,9 @@ export function AttachmentTile({
   kind,
   media,
   name,
-  meta,
+  uploader,
+  facts,
+  factsTip,
   note,
   download,
   footer,
@@ -55,7 +57,11 @@ export function AttachmentTile({
   kind: "media" | "file";
   media: ReactNode;
   name: string;
-  meta: ReactNode;
+  /** The uploader's small avatar. */
+  uploader: ReactNode;
+  /** Time and size, one line; `factsTip` spells them out in full. */
+  facts: ReactNode;
+  factsTip: string;
   note?: string | undefined;
   download: string;
   /** e.g. the decision the file rests on. */
@@ -89,7 +95,10 @@ export function AttachmentTile({
           </Tooltip>
         </div>
         <div className={styles.meta} data-attachment-meta>
-          {meta}
+          {uploader}
+          <Tooltip content={factsTip}>
+            <span className={styles.facts}>{facts}</span>
+          </Tooltip>
         </div>
         <AttachmentNote name={name} note={note} />
         {footer && <div className={styles.footer}>{footer}</div>}
