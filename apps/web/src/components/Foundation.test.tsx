@@ -290,7 +290,7 @@ test("U1/C-209 shell orders Needs You first with its count, then 卡片, 观察 
 
 test("U1 list filters survive a copied route, dropdown clearing, back navigation and remount", async () => {
   window.location.hash =
-    "#/p/p-1/cards?view=list&status=in_progress&next=human&q=%E5%87%86%E5%A4%87";
+    "#/p/p-1/cards?view=list&status=in_progress&template=_custom&q=%E5%87%86%E5%A4%87";
   const cards = vi.fn(fakeClient().cards),
     client = fakeClient({ cards });
   const page = render(
@@ -303,7 +303,7 @@ test("U1 list filters survive a copied route, dropdown clearing, back navigation
     expect.objectContaining({
       mode: "list",
       status: "in_progress",
-      next: "human",
+      template: "_custom",
       q: "准备",
     }),
     expect.any(AbortSignal),
@@ -318,15 +318,17 @@ test("U1 list filters survive a copied route, dropdown clearing, back navigation
       .getAttribute("aria-checked"),
   ).toBe("true");
   fireEvent.keyDown(document, { key: "Escape" });
-  changeControl(screen.getByRole("combobox", { name: "下一步：所有者" }), {
-    target: { value: "" },
-  });
+  changeControl(
+    screen.getByRole("combobox", { name: "类型：自定义或未知模板" }),
+    { target: { value: "" } },
+  );
   expect(parseRoute(window.location.hash)).toMatchObject({
     kind: "cards",
     filters: { view: "list", status: "in_progress", q: "准备" },
   });
   act(() => {
-    window.location.hash = "#/p/p-1/cards?view=board&status=done&next=none";
+    window.location.hash =
+      "#/p/p-1/cards?view=list&status=done&template=_custom";
     window.dispatchEvent(new HashChangeEvent("hashchange"));
   });
   fireEvent.click(screen.getByRole("button", { name: "状态：已完成" }));
@@ -339,7 +341,9 @@ test("U1 list filters survive a copied route, dropdown clearing, back navigation
   );
   page.unmount();
   render(<CardListPage client={client} projectId="p-1" view="list" />);
-  expect(screen.getByRole("combobox", { name: "下一步：无人" })).toBeTruthy();
+  expect(
+    screen.getByRole("combobox", { name: "类型：自定义或未知模板" }),
+  ).toBeTruthy();
 });
 
 test("U1 activity restores filters and pagination without losing project identity", async () => {
