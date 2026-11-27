@@ -49,7 +49,12 @@ import {
   RefreshGroup,
 } from "../components/RefreshGroup.js";
 import { RequestFeedback } from "../components/RequestFeedback.js";
-import { TemplateMarker } from "../components/TemplateMarker.js";
+import {
+  CUSTOM_TEMPLATE_FILTER,
+  TEMPLATE_GLYPHS,
+  TemplateMarker,
+  templateFilterOption,
+} from "../components/TemplateMarker.js";
 import { Tooltip } from "../components/Tooltip.js";
 import { Button, IconButton } from "../components/ui/button.js";
 import { SearchInput } from "../components/ui/input.js";
@@ -103,37 +108,21 @@ const idNumber = (id: string): number => {
   const digits = /(\d+)\)?$/.exec(id)?.[1];
   return digits === undefined ? 0 : Number(digits);
 };
-const nextKind = (card: CardListItem): "human" | "agent" | "none" => {
-  if (
-    card.next_owners.some((owner) => owner.kind === "human") ||
-    card.waiting_on.some(
-      (waiting) =>
-        waiting.kind === "decision" || waiting.kind === "human_action",
-    )
-  )
-    return "human";
-  if (
-    card.next_owners.some(
-      (owner) => owner.kind === "role" || owner.kind === "assignment",
-    )
-  )
-    return "agent";
-  return "none";
-};
 function filteredCards(
   cards: readonly CardListItem[],
   filters: Readonly<Record<string, string>>,
+  view: "board" | "list",
 ): readonly CardListItem[] {
-  const selected = new Set(statusesOf(filters.status)),
+  // C-816: the board's columns are the statuses; only the list filters them.
+  const selected = new Set(view === "list" ? statusesOf(filters.status) : []),
     q = (filters.q ?? "").trim().toLocaleLowerCase(),
-    next = filters.next ?? "",
-    role = filters.role ?? "";
+    template = filters.template ?? "";
   const matched = cards.filter(
     (card) =>
       (selected.size === 0 || selected.has(card.status)) &&
       inSnapshotGroup(card, filters.overview ?? "") &&
-      (next === "" || nextKind(card) === next) &&
-      (role === "" || card.roles.includes(role)) &&
+      (template === "" ||
+        templateFilterOption(card, card.template_info).value === template) &&
       `${card.id} ${card.title}`.toLocaleLowerCase().includes(q),
   );
   return [...matched].sort((left, right) => {
@@ -148,6 +137,11 @@ function filteredCards(
     );
   });
 }
+/** Old links may still carry `next`/`role` (and `status` on the board). */
+const filterKeys = (view: "board" | "list") =>
+  view === "list"
+    ? ["status", "q", "template", "sort", "overview"]
+    : ["q", "template", "sort", "overview"];
 function readRefresh(key: string) {
   try {
     const raw = localStorage.getItem(key);
@@ -248,7 +242,7 @@ export function CardListPage({
   const previousOpen = useRef<string | undefined>(undefined);
   const requestKey = JSON.stringify(
     Object.fromEntries(
-      ["status", "q", "next", "role", "sort", "overview", "page", "count"]
+      [...filterKeys(view), "page", "count"]
         .map((key) => [key, filters[key] ?? ""])
         .concat([["mode", view]]),
     ),
@@ -398,7 +392,7 @@ export function CardListPage({
     : error
       ? { kind: "error", message: error }
       : { kind: "loading" };
-  const cards = data ? filteredCards(data.cards, filters) : [];
+  const cards = data ? filteredCards(data.cards, filters, view) : [];
   const pageSize = ["10", "20", "50"].includes(filters.count ?? "")
     ? Number(filters.count)
     : 10;
@@ -412,13 +406,34 @@ export function CardListPage({
   const pageCards = data?.server_filtered
     ? cards
     : cards.slice((page - 1) * pageSize, page * pageSize);
-  const roles =
-    data?.roles ??
-    [...new Set((data?.cards ?? []).flatMap((card) => card.roles))].sort();
-  const activeFilters = Object.entries(filters).some(
-    ([key, value]) =>
-      !["expanded", "view", "card", "page", "count"].includes(key) &&
-      Boolean(value),
+  const usedTemplates =
+    data?.templates ??
+    [
+      ...new Map(
+        (data?.cards ?? []).map((card) => {
+          const option = templateFilterOption(card, card.template_info);
+          return [option.value, option];
+        }),
+      ).values(),
+    ].sort(
+      // Same order as the server: by name, the shared custom option last.
+      (a, b) =>
+        Number(a.value === CUSTOM_TEMPLATE_FILTER) -
+          Number(b.value === CUSTOM_TEMPLATE_FILTER) ||
+        a.label.localeCompare(b.label, "zh-Hans-CN") ||
+        a.value.localeCompare(b.value),
+    );
+  // Name a copied "custom" link before the first page arrives.
+  const templateOptions =
+    filters.template === CUSTOM_TEMPLATE_FILTER &&
+    !usedTemplates.some((o) => o.value === CUSTOM_TEMPLATE_FILTER)
+      ? [
+          ...usedTemplates,
+          { value: CUSTOM_TEMPLATE_FILTER, label: TEMPLATE_GLYPHS.custom.name },
+        ]
+      : usedTemplates;
+  const activeFilters = filterKeys(view).some(
+    (key) => key !== "sort" && Boolean(filters[key]),
   );
   const statusOptions = BOARD_STATUSES.map((status) => ({
     value: status,
@@ -511,56 +526,39 @@ export function CardListPage({
             ? [{ key: "overview", label: "概览", options: SNAPSHOT_GROUPS }]
             : []),
           {
-            key: "status",
-            label: "状态",
-            multiple: true,
-            options: statusOptions,
-            render: (value, setValue) => (
-              <MultiSelect
-                label="状态"
-                options={statusOptions}
-                values={statusesOf(value)}
-                onChange={(next) => setValue(next.join(","))}
-              />
-            ),
-          },
-          {
-            key: "next",
-            label: "下一步谁做",
-            options: [
-              { value: "human", label: "所有者" },
-              { value: "agent", label: "Agent" },
-              { value: "none", label: "无人" },
-            ],
+            key: "template",
+            label: "类型",
+            options: templateOptions,
             render: (value, setValue) => (
               <FilterSelect
-                label="下一步"
+                label="类型"
                 value={value}
-                options={[
-                  { value: "human", label: "所有者" },
-                  { value: "agent", label: "Agent" },
-                  { value: "none", label: "无人" },
-                ]}
+                options={templateOptions}
                 onChange={setValue}
               />
             ),
           },
-          {
-            key: "role",
-            label: "角色",
-            options: roles.map((role) => ({ value: role, label: role })),
-            render: (value, setValue) => (
-              <FilterSelect
-                label="角色"
-                value={value}
-                options={roles.map((role) => ({
-                  value: role,
-                  label: role,
-                }))}
-                onChange={setValue}
-              />
-            ),
-          },
+          ...(view === "list"
+            ? [
+                {
+                  key: "status",
+                  label: "状态",
+                  multiple: true,
+                  options: statusOptions,
+                  render: (
+                    value: string,
+                    setValue: (value: string) => void,
+                  ) => (
+                    <MultiSelect
+                      label="状态"
+                      options={statusOptions}
+                      values={statusesOf(value)}
+                      onChange={(next) => setValue(next.join(","))}
+                    />
+                  ),
+                },
+              ]
+            : []),
           {
             key: "sort",
             label: "排序",
@@ -651,9 +649,7 @@ export function CardListPage({
             <Board
               resetKey={JSON.stringify([
                 projectId,
-                ...["status", "overview", "next", "role", "q", "sort"].map(
-                  (key) => filters[key] ?? "",
-                ),
+                ...filterKeys(view).map((key) => filters[key] ?? ""),
               ])}
               cards={cards}
               remote={

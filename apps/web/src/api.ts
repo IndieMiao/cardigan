@@ -606,6 +606,10 @@ export interface DecisionView {
   readonly context?: string;
   /** Card attachments the requester referenced, in display order (§6). */
   readonly attachments?: readonly AttachmentView[];
+  /** C-809: attachments left out at the per-decision limit; absent when none. */
+  readonly attachments_omitted?: number;
+  /** C-809: the card's acceptance criteria when a completion review was raised. */
+  readonly acceptance_criteria_snapshot?: readonly string[];
   /** Presentation only; each source question still has its own answer. */
   readonly grouped_decisions?: readonly (DecisionView &
     AuthorView & { readonly approval_target?: string })[];
@@ -827,6 +831,11 @@ export interface CardPage {
   readonly page?: number;
   readonly page_size?: number;
   readonly roles?: readonly string[];
+  /** C-816: card types used in the project, named like TemplateMarker. */
+  readonly templates?: readonly {
+    readonly value: string;
+    readonly label: string;
+  }[];
   readonly lanes?: Readonly<
     Record<
       string,

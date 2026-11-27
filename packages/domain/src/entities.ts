@@ -1589,10 +1589,12 @@ export interface StreamedArtifact {
   /**
    * C-809: the file starts with the signature of its declared bitmap type
    * (PNG, JPEG, GIF, WebP or AVIF) and fits the inline attachment size, so
-   * pages may show it like an ordinary upload. Absent means download only,
-   * including every stream uploaded before C-809 (never backfilled).
+   * pages may show it like an ordinary upload. `false` or absent means
+   * download only. C-819: streams uploaded before C-809 get the same verdict
+   * from the host's startup backfill (`false` when the file does not match);
+   * absent remains only where the file was not readable on the host.
    */
-  readonly inline_image?: true;
+  readonly inline_image?: boolean;
   readonly expired?: {
     readonly at: Timestamp;
     readonly reason: "age" | "capacity";

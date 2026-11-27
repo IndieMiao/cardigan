@@ -19,6 +19,10 @@ import {
   Store,
 } from "@cardigan/store";
 import { afterEach, expect, test, vi } from "vitest";
+import {
+  ANDROID_DEVICE_PROBE_COMMAND,
+  androidDeviceProvider,
+} from "./android-device-provider.js";
 import { refreshMachineObservations } from "./machine-capabilities.js";
 import {
   BUILTIN_MACHINE_CAPABILITIES,
@@ -103,6 +107,9 @@ test("private custom catalog cannot replace builtins or load unsafe files", () =
     { node: { check: ["echo", "24.0"] } },
     { bad: { check: "shell command" } },
     { bad: { check: ["tool"], os: ["windows"] } },
+    // C-813: device keys only come from the device listing.
+    { "android.device": { check: ["true"] } },
+    { "android.device.model.x": { check: ["true"] } },
   ])
     expect(() =>
       parseMachineCapabilityCatalog({ version: 1, capabilities: custom }),
@@ -823,6 +830,140 @@ test("C-708: a tool the probe cannot find leaves the machine's other capabilitie
       "godot",
       "node",
     ]);
+  } finally {
+    store.close();
+  }
+});
+
+test("C-813: machine check asks each device provider; devices and their states are recorded, available (and held) ones become capabilities", async () => {
+  const store = Store.open({ dataDir: temp() });
+  try {
+    store.createProject({ id: "a" });
+    const machine = () => {
+      const registered = store.uow.read((tx) => tx.machines.get("a", "local"));
+      if (!registered) throw new Error("Missing fixture machine");
+      return registered;
+    };
+    const execution: ExecutionConfig = { mode: "local", dataDir: temp() };
+    let adb = true;
+    let listing: { ok: boolean; output: string } = {
+      ok: true,
+      output: JSON.stringify({
+        devices: [
+          {
+            serial: "WGC6R21609003324",
+            state: "device",
+            model: "MRR-W39",
+            android: "12",
+          },
+          { serial: "R58N", state: "unauthorized" },
+        ],
+      }),
+    };
+    const probe = vi.fn(
+      async (_e: ExecutionConfig, _os: string, command: CapabilityCommand) => {
+        if (command === ANDROID_DEVICE_PROBE_COMMAND) return listing;
+        return Array.isArray(command) && command[0] === "adb" && adb
+          ? { ok: true, output: "Version 37.0.3" }
+          : { ok: false, output: "" };
+      },
+    );
+    const options = {
+      store,
+      project: "a",
+      machine: "local",
+      target: () => ({ execution, machine: machine() }),
+      check: async () => ({ blockers: [], launch_enabled: true }),
+      catalog: () =>
+        BUILTIN_MACHINE_CAPABILITIES.filter((c) => c.key === "android.sdk"),
+      probe,
+      deviceProviders: [androidDeviceProvider],
+      now: () => "2026-11-25T00:00:00.000Z",
+    };
+    const keys = (r: Awaited<ReturnType<typeof refreshMachineObservations>>) =>
+      r.capabilities.map((c) => c.key).sort();
+    const tablet = {
+      type: "android.device",
+      id: "WGC6R21609003324",
+      state: "available",
+      model: "MRR-W39",
+      version: "12",
+    };
+    const first = await refreshMachineObservations(options);
+    expect(first.health?.devices).toEqual([
+      { type: "android.device", id: "R58N", state: "unauthorized" },
+      tablet,
+    ]);
+    expect(keys(first)).toEqual([
+      "android.device",
+      "android.device.model.mrr-w39",
+      "android.device:WGC6R21609003324",
+      "android.sdk",
+    ]);
+    // Unplugged: gone from the list, and the machine loses the capability.
+    listing = { ok: true, output: JSON.stringify({ devices: [] }) };
+    const unplugged = await refreshMachineObservations(options);
+    expect(unplugged.health?.devices).toEqual([]);
+    expect(keys(unplugged)).toEqual(["android.sdk"]);
+    // Plugged back in but the authorization was revoked.
+    listing = {
+      ok: true,
+      output: JSON.stringify({
+        devices: [{ serial: "WGC6R21609003324", state: "unauthorized" }],
+      }),
+    };
+    const revoked = await refreshMachineObservations(options);
+    expect(revoked.health?.devices).toEqual([
+      { type: "android.device", id: "WGC6R21609003324", state: "unauthorized" },
+    ]);
+    expect(keys(revoked)).toEqual(["android.sdk"]);
+    expect(revoked.health?.status).toBe("passed");
+    // Available again, then held by a Run's own adb server: the listing no
+    // longer sees it, but it stays as in use with the machine's capability.
+    listing = {
+      ok: true,
+      output: JSON.stringify({
+        devices: [
+          { serial: "WGC6R21609003324", state: "device", model: "MRR-W39" },
+        ],
+      }),
+    };
+    await refreshMachineObservations(options);
+    store.database
+      .prepare(
+        "INSERT INTO machine_device_leases (generation,machine,type,device,project,assignment_id,run_id,acquired_at) VALUES ('g','local','android.device','WGC6R21609003324','a','A-1','R-1','2026-11-25T00:00:00.000Z')",
+      )
+      .run();
+    listing = { ok: true, output: JSON.stringify({ devices: [] }) };
+    const held = await refreshMachineObservations(options);
+    expect(held.health?.devices).toEqual([
+      {
+        type: "android.device",
+        id: "WGC6R21609003324",
+        state: "in_use",
+        model: "MRR-W39",
+      },
+    ]);
+    expect(keys(held)).toContain("android.device");
+    // An unreadable listing is reported but does not fail the machine.
+    listing = { ok: false, output: "" };
+    const failed = await refreshMachineObservations(options);
+    expect(failed.health).toMatchObject({ status: "passed", available: true });
+    expect(failed.health?.capability_failures).toEqual([
+      {
+        key: "android.device",
+        search_locations: [],
+        reason: "无法列出安卓真机",
+      },
+    ]);
+    // No adb on the machine: the provider is not asked at all.
+    adb = false;
+    probe.mockClear();
+    const none = await refreshMachineObservations(options);
+    expect(none.health?.devices).toBeUndefined();
+    expect(
+      probe.mock.calls.some(([, , c]) => c === ANDROID_DEVICE_PROBE_COMMAND),
+    ).toBe(false);
   } finally {
     store.close();
   }

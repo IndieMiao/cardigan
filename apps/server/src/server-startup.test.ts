@@ -1,7 +1,14 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type {
+  Attachment,
+  CardId,
+  ProjectId,
+  TimelineEntry,
+} from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { ControlPlaneOptions } from "./assembly.js";
@@ -252,3 +259,54 @@ test.each([true, false])(
     if (!release) expect(dispatch).not.toHaveBeenCalled();
   },
 );
+
+test("C-819: startup gives old streamed images their verdict and reports the counts", async () => {
+  const png = Buffer.from("\x89PNG\r\n\x1a\nrest-of-file", "latin1");
+  mkdirSync(join(dataDir, "artifacts"), { recursive: true });
+  const put = (id: string, onDisk: boolean) => {
+    const blob_id = randomUUID();
+    if (onDisk) writeFileSync(join(dataDir, "artifacts", blob_id), png);
+    store.uow.run((tx) =>
+      tx.attachments.put(project.project_id as ProjectId, {
+        id: id as Attachment["id"],
+        sha256: "0".repeat(64),
+        mime: "image/png",
+        size: png.byteLength,
+        card_id: "C-1" as CardId,
+        uploaded_by: "assignment:A-1",
+        storage_path: `artifacts/${blob_id}`,
+        attach_to: {
+          kind: "timeline_entry",
+          id: "C-1#1" as TimelineEntry["id"],
+        },
+        kind: "evidence",
+        streamed_artifact: {
+          blob_id,
+          run_id: "R-1" as never,
+          created_at: "2026-11-27T04:03:00.000Z" as never,
+        },
+      }),
+    );
+  };
+  put("S-1", true);
+  put("S-2", false);
+  const warnings: string[] = [];
+  server = await startCardiganServer({
+    config: { dataDir, host: "127.0.0.1", port: 0 },
+    store,
+    git: stubGit({ project }),
+    dispatcher: dispatcher(),
+    warn: (line) => warnings.push(line),
+  });
+  expect(
+    store.uow
+      .read((tx) => tx.attachments.list(project.project_id as ProjectId))
+      .map((a) => [a.id, a.streamed_artifact?.inline_image]),
+  ).toEqual([
+    ["S-1", true],
+    ["S-2", undefined],
+  ]);
+  expect(warnings).toContain(
+    "旧流式图片补标记：可内嵌 1 条，只给下载 0 条，文件不在本机跳过 1 条",
+  );
+});

@@ -94,6 +94,8 @@ Workbench 向导的“目标机命令”列出这台机器要执行的命令，�
 
 一次性初始化建的账号里，HOME、`~/.local` 和 `~/.local/bin` 由 root 持有（0750），专用账号自己写不进去，所以对话框里往这几处写的命令目前会因权限失败。在这一点修好之前，按[第 3 节](#3-worker工具和-helper)由管理员（**要 sudo**）把工具装到 root 持有的位置，再链接进 `~/.local/bin` 或加进绑定的 `path`，然后点“复查”。某个工具检测不到只是不登记这项能力，不影响机器健康和其它派发。
 
+接 USB 安卓真机见[接入一台安卓真机](android-device.md)；其它外接设备的框架见[设备提供方](device-providers.md)。
+
 ### 初始化脚本做什么
 
 初始化脚本只做以下操作（HOME 为 `/Users/cg_<项目>`，工作根为 `/Users/cardigan-workers/<项目>`，安装配置写在 `/Library/Cardigan`。）：

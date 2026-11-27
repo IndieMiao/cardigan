@@ -14,16 +14,24 @@ export interface CapabilityRequirement {
   readonly version?: string;
 }
 
-/** Deliberately not a semver range language: only numeric dotted versions. */
+/**
+ * Deliberately not a semver range language: only numeric dotted versions.
+ * C-813: a key may name one device as `<type>:<device id>` (see
+ * device-provider.ts); the id keeps its case.
+ */
 export function parseCapabilityRequirement(
   input: unknown,
 ): Result<CapabilityRequirement> {
   const match =
     typeof input === "string"
-      ? /^([a-z0-9][a-z0-9._-]*)(?:(>=|=)([0-9]+(?:\.[0-9]+)*))?$/.exec(input)
+      ? /^([a-z0-9][a-z0-9._-]*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,63})?)(?:(>=|=)([0-9]+(?:\.[0-9]+)*))?$/.exec(
+          input,
+        )
       : null;
   if (!match || match[0] !== input)
-    return validationFailed("能力需求只接受能力名、能力名=版本或能力名>=版本");
+    return validationFailed(
+      "能力需求只接受能力名、能力名=版本、能力名>=版本或 设备类型:设备编号",
+    );
   return {
     ok: true,
     value: {
