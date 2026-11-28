@@ -176,6 +176,93 @@ test("the real listing script uses a throw-away adb server and stops it", async 
   }
 }, 20_000);
 
+test("C-841: with one serial the listing script claims only that device (--one-device) and reports only it", async () => {
+  const bin = await mkdtemp(join(tmpdir(), "cg-fake-adb-one-"));
+  try {
+    await writeFile(
+      join(bin, "adb"),
+      fakeAdb.replace(
+        "args = sys.argv[1:]\n",
+        "args = sys.argv[1:]\none = None\nif args[2:3] == ['--one-device']: one = args[3]; args = args[:2] + args[4:]\nopen(os.environ['FAKE_ADB_LOG'], 'a').write('one ' + str(one) + '\\n')\n",
+      ),
+    );
+    await chmod(join(bin, "adb"), 0o755);
+    const log = join(bin, "log");
+    const run = (serial: string) =>
+      new Promise<string>((resolve, reject) => {
+        const child = spawn(
+          "python3",
+          [...ANDROID_DEVICE_PROBE_COMMAND.slice(1), serial],
+          {
+            env: {
+              PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+              FAKE_ADB_LOG: log,
+            },
+            stdio: ["ignore", "pipe", "inherit"],
+          },
+        );
+        let out = "";
+        child.stdout.on("data", (b: Buffer) => {
+          out += b.toString();
+        });
+        child.once("error", reject);
+        child.once("close", (code) =>
+          code === 0 ? resolve(out) : reject(new Error(`exit ${code}`)),
+        );
+      });
+    expect(
+      normalizeDeviceInventory(
+        TYPE,
+        parseAndroidDevices(await run(TABLET.id)) ?? [],
+      ),
+    ).toEqual([TABLET]);
+    const lines = (await readFile(log, "utf8")).trim().split("\n");
+    expect(lines[0]).toBe(`one ${TABLET.id}`);
+    expect(lines.at(-1)).toBe("killed");
+    // Another serial the server does not list: nothing is reported.
+    expect(parseAndroidDevices(await run("GONE1"))).toEqual([]);
+  } finally {
+    await rm(bin, { recursive: true, force: true });
+  }
+}, 20_000);
+
+test("C-841: presence asks about one valid serial and tells missing from no answer", async () => {
+  const probe = vi.fn<CapabilityProbe>(async () => ({
+    ok: true,
+    output: JSON.stringify({
+      devices: [
+        { serial: TABLET.id, state: "device", model: "MRR-W39", android: "12" },
+        { serial: "OTHER", state: "device" },
+      ],
+    }),
+  }));
+  const target = {
+    execution: { mode: "local", dataDir: "/nonexistent" } as const,
+    os: "linux",
+    probe,
+  };
+  const presence = androidDeviceProvider.presence;
+  if (!presence) throw new Error("missing presence");
+  expect(await presence(target, TABLET)).toEqual(TABLET);
+  expect(probe.mock.calls[0]?.[2]).toEqual([
+    ...ANDROID_DEVICE_PROBE_COMMAND,
+    TABLET.id,
+  ]);
+  probe.mockResolvedValueOnce({
+    ok: true,
+    output: JSON.stringify({ devices: [] }),
+  });
+  expect(await presence(target, TABLET)).toBe("missing");
+  probe.mockResolvedValueOnce({ ok: false, output: "" });
+  expect(await presence(target, TABLET)).toBeUndefined();
+  probe.mockResolvedValueOnce({ ok: true, output: "junk" });
+  expect(await presence(target, TABLET)).toBeUndefined();
+  probe.mockClear();
+  expect(await presence(target, { type: TYPE, id: "-x;rm" })).toBeUndefined();
+  expect(await presence(target, { type: "other", id: "S1" })).toBeUndefined();
+  expect(probe).not.toHaveBeenCalled();
+});
+
 const fakeInitAdb = `#!/usr/bin/env python3
 import os, socket, sys
 args = sys.argv[1:]

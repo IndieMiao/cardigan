@@ -63,6 +63,8 @@ export interface MachineHealth {
   readonly readiness?: MachineReadiness;
   /** C-813: external devices the providers listed; strictly validated fields only. */
   readonly devices?: readonly DeviceObservation[];
+  /** C-841: last device presence check that updated `devices` in place. */
+  readonly devices_checked_at?: string;
 }
 export type MachineReadinessStatus =
   | "ok"
@@ -257,6 +259,96 @@ export function completeMachineObservation(
         c.evidence_ref,
       );
     }
+    return true;
+  });
+}
+
+/** C-841: what a device presence check changes in the current observation. */
+export interface MachineDeviceUpdate {
+  /** The whole new device listing (every provider type). */
+  readonly devices: readonly DeviceObservation[];
+  readonly checked_at: string;
+  /** Capability keys whose rows are deleted (device and alternative keys). */
+  readonly remove: readonly string[];
+  /** Capability rows written after the removal. */
+  readonly add: readonly MachineCapability[];
+}
+
+/**
+ * C-841: a device presence check updates the device listing and the device
+ * capability keys of the current observation in place. Only while that
+ * observation is still current and passed: a machine check started since
+ * (or a newer observation) wins and nothing is written. `update` runs inside
+ * the write transaction with the current health and capability rows;
+ * undefined writes nothing. System actor only, like the other writers.
+ */
+export function recordMachineDevices(
+  store: Store,
+  actor: Actor,
+  project: string,
+  machine: string,
+  observation: string,
+  update: (current: {
+    readonly health: MachineHealth;
+    readonly capabilities: readonly MachineCapability[];
+  }) => MachineDeviceUpdate | undefined,
+): boolean {
+  systemOnly(actor, project);
+  return store.uow.run(() => {
+    const row = store.database
+      .prepare(
+        "SELECT observation_id, doc FROM machine_health WHERE project_id = ? AND machine_id = ?",
+      )
+      .get(project, machine);
+    if (!row || String(row.observation_id) !== observation) return false;
+    const doc = JSON.parse(String(row.doc)) as Record<string, unknown>;
+    const { health } = decodeHealth(String(row.doc));
+    if (health.status !== "passed") return false;
+    const capabilities = store.database
+      .prepare(
+        "SELECT key, version, verified_at, evidence_ref FROM machine_capabilities WHERE project_id = ? AND machine_id = ? ORDER BY key",
+      )
+      .all(project, machine)
+      .map(
+        (r): MachineCapability => ({
+          key: String(r.key),
+          version: r.version === null ? null : String(r.version),
+          verified_at: String(r.verified_at),
+          evidence_ref: String(r.evidence_ref),
+        }),
+      );
+    const next = update({ health, capabilities });
+    if (!next) return false;
+    store.database
+      .prepare(
+        "UPDATE machine_health SET doc = ? WHERE project_id = ? AND machine_id = ? AND observation_id = ?",
+      )
+      .run(
+        JSON.stringify({
+          ...doc,
+          devices: next.devices,
+          devices_checked_at: next.checked_at,
+        }),
+        project,
+        machine,
+        observation,
+      );
+    const remove = store.database.prepare(
+      "DELETE FROM machine_capabilities WHERE project_id = ? AND machine_id = ? AND key = ?",
+    );
+    for (const key of next.remove) remove.run(project, machine, key);
+    const insert = store.database.prepare(
+      "INSERT INTO machine_capabilities VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(project_id, machine_id, key) DO UPDATE SET version = excluded.version, verified_at = excluded.verified_at, evidence_ref = excluded.evidence_ref",
+    );
+    for (const c of next.add)
+      insert.run(
+        project,
+        machine,
+        c.key,
+        c.version,
+        c.verified_at,
+        c.evidence_ref,
+      );
     return true;
   });
 }
