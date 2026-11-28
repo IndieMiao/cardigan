@@ -1,8 +1,10 @@
+/** C-845: the fixed label of a locked (busy) database. */
+export const DATABASE_LOCKED_CAUSE = "数据库被锁";
 /** C-650: well-known start failures, mapped to fixed human-readable labels. */
 const FAILURE_CAUSES: readonly (readonly [RegExp, string])[] = [
   [
     /\bdatabase (?:table )?is locked\b|\bSQLITE_(?:BUSY|LOCKED)\b/u,
-    "数据库被锁",
+    DATABASE_LOCKED_CAUSE,
   ],
   [/\bdatabase or disk is full\b|\bSQLITE_FULL\b|\bENOSPC\b/u, "磁盘已满"],
   [/\bEADDRINUSE\b/u, "端口被占用"],

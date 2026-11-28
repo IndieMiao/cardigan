@@ -31,6 +31,7 @@ import type {
 import { currentDeploymentPin } from "@cardigan/domain";
 import { gitSafetyArguments } from "@cardigan/git-transport";
 import type { Store } from "@cardigan/store";
+import { databaseOpeners } from "./database-openers.js";
 import {
   type DeploymentHandoff,
   RoleRefreshFailed,
@@ -56,11 +57,18 @@ import {
 import {
   DEFAULT_CAPACITY_WAIT_TIMEOUT_MS,
   DEFAULT_EVIDENCE_WAIT_TIMEOUT_MS,
+  DEFAULT_ROLE_SYNC_LOCK_BACKOFF_MS,
+  DEFAULT_ROLE_SYNC_LOCK_RETRIES,
   type DeploymentConfig,
   deploymentDirectory,
+  ROLE_SYNC_LOCK_BACKOFF_CAP,
   requireHostDirectory,
 } from "./deployment-config.js";
-import { DeploymentBuildLog, DeploymentServerReady } from "./deployment-log.js";
+import {
+  DATABASE_LOCKED_CAUSE,
+  DeploymentBuildLog,
+  DeploymentServerReady,
+} from "./deployment-log.js";
 import { maintenanceActive } from "./deployment-maintenance.js";
 import { DeploymentRetention } from "./deployment-retention.js";
 import {
@@ -107,11 +115,20 @@ const exitText = (code: number | null) =>
  * startup work) with its fixed label; the matched text itself never leaves.
  */
 function withCause(message: string, output: string) {
-  const log = new DeploymentBuildLog();
-  log.append(`${output}\n`);
-  const causes = log.causes();
+  const causes = outputCauses(output);
   return causes.length ? `${message}（${causes.join("、")}）` : message;
 }
+function outputCauses(output: string) {
+  const log = new DeploymentBuildLog();
+  log.append(`${output}\n`);
+  return log.causes();
+}
+/** C-845: the sync's output names a locked (busy) database. */
+const databaseLocked = (output: string) =>
+  outputCauses(output).includes(DATABASE_LOCKED_CAUSE);
+/** C-845: backoff before retry `n` (from 0): doubling, capped at 8× the first. */
+export const roleSyncBackoff = (first: number, n: number) =>
+  Math.max(0, first) * Math.min(2 ** n, ROLE_SYNC_LOCK_BACKOFF_CAP);
 /**
  * C-801: an active standing PM Office and PM Ops whose sessions exist, so
  * nobody has to start PM Ops after a deployment.
@@ -269,6 +286,11 @@ export class NodeDeploymentDriver
     // C-650: likewise, a hand-built config keeps the legacy in-memory failure.
     this.readyRetryMax = options.config.ready_retry_max;
     this.readyRetryIntervalMs = options.config.ready_retry_interval_ms;
+    this.roleSyncLockRetries =
+      options.config.role_sync_lock_retries ?? DEFAULT_ROLE_SYNC_LOCK_RETRIES;
+    this.roleSyncLockBackoffMs =
+      options.config.role_sync_lock_backoff_ms ??
+      DEFAULT_ROLE_SYNC_LOCK_BACKOFF_MS;
     this.directory = deploymentDirectory(options.dataDir);
     if (options.config.retention)
       this.retention = new DeploymentRetention(
@@ -1609,34 +1631,82 @@ export class NodeDeploymentDriver
     const before = await snapshot("上一版本", previous.release);
     const after = await snapshot("当前版本", this.state.current.release);
     const changed = Object.keys(after).filter((id) => after[id] !== before[id]);
-    let result: { code: number | null; text: string };
-    try {
-      result = await this.command(
-        process.execPath,
-        [
-          join(this.state.current.release, "apps/cli/dist/bin.js"),
-          "self-deploy",
-          "roles",
-        ],
-        this.state.current.release,
-        {
-          ...this.options.env,
-          CARDIGAN_DATA_DIR: this.options.dataDir,
-          CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
-          CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify(before),
-        },
+    // C-845: a locked database is waited out here, with a bounded backoff,
+    // before the controller's single C-801 retry of the whole refresh.
+    const started = Date.now();
+    let retried = 0;
+    for (;;) {
+      let result: { code: number | null; text: string };
+      try {
+        result = await this.command(
+          process.execPath,
+          [
+            join(this.state.current.release, "apps/cli/dist/bin.js"),
+            "self-deploy",
+            "roles",
+          ],
+          this.state.current.release,
+          {
+            ...this.options.env,
+            CARDIGAN_DATA_DIR: this.options.dataDir,
+            CARDIGAN_DEPLOYMENT_CHANGED_ROLES: JSON.stringify(changed),
+            CARDIGAN_DEPLOYMENT_PREVIOUS_ROLES: JSON.stringify(before),
+          },
+        );
+      } catch {
+        throw new RoleRefreshFailed("sync", "self-deploy roles 无法启动", {
+          changed,
+        });
+      }
+      if (result.code === 0) return;
+      const message = withCause(
+        `self-deploy roles ${exitText(result.code)}`,
+        result.text,
       );
-    } catch {
-      throw new RoleRefreshFailed("sync", "self-deploy roles 无法启动", {
-        changed,
-      });
-    }
-    if (result.code !== 0)
+      if (!databaseLocked(result.text))
+        throw new RoleRefreshFailed("sync", message, {
+          output: result.text,
+          changed,
+        });
+      if (retried < this.roleSyncLockRetries) {
+        await delay(roleSyncBackoff(this.roleSyncLockBackoffMs, retried));
+        retried++;
+        continue;
+      }
+      const waited_ms = Math.max(0, Date.now() - started);
+      const holders = await this.databaseHolders();
       throw new RoleRefreshFailed(
         "sync",
-        withCause(`self-deploy roles ${exitText(result.code)}`, result.text),
-        { output: result.text, changed },
+        `${message}；同步内已退避重试 ${retried} 次、共等约 ${Math.round(waited_ms / 1000)} 秒仍被锁；打开数据库的进程：${holders.length ? holders.join("、") : "未能识别"}`,
+        {
+          output: result.text,
+          changed,
+          lock: { retries: retried, waited_ms, holders },
+        },
       );
+    }
+  }
+  /** C-845: in-sync retries of a locked role sync and the first backoff. */
+  roleSyncLockRetries: number;
+  roleSyncLockBackoffMs: number;
+  /** C-845: other processes with the database open, labelled; never throws. */
+  async databaseHolders(): Promise<string[]> {
+    const known: Record<number, string> = {};
+    for (const [pid, label] of [
+      [this.state.process?.pid, "web 服务"],
+      [this.child?.pid, "web 服务"],
+      [this.state.background?.pid, "后台服务"],
+      [this.backgroundChild?.pid, "后台服务"],
+    ] as const)
+      if (pid) known[pid] = label;
+    try {
+      return await databaseOpeners(
+        join(this.options.dataDir, "cardigan.db"),
+        known,
+      );
+    } catch {
+      return [];
+    }
   }
   /** C-801: PM Office and PM Ops of the deployment project are both on duty. */
   async standingPmOnDuty() {

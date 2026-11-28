@@ -10,6 +10,8 @@ import {
   type DeploymentReadyRetry,
   type DeploymentRecord,
   POST_DEPLOY_ERROR_MAX,
+  POST_DEPLOY_LOCK_HOLDERS_MAX,
+  type PostDeployLockWait,
   type PostDeployStep,
 } from "@cardigan/domain";
 import { redactCommandTail } from "./deployment-log.js";
@@ -71,6 +73,8 @@ export class RoleRefreshFailed extends Error {
       readonly output?: string;
       /** Default roles whose pack changed, once both snapshots were read. */
       readonly changed?: readonly string[];
+      /** C-845: the sync kept finding the database locked. */
+      readonly lock?: PostDeployLockWait;
     } = {},
   ) {
     super(message);
@@ -100,6 +104,17 @@ function postDeployAttempt(error: unknown) {
       step: error.step,
       error: error.message.slice(0, POST_DEPLOY_ERROR_MAX),
       ...(output ? { output_tail: output } : {}),
+      ...(error.step === "sync" && error.detail.lock
+        ? {
+            lock_wait: {
+              retries: error.detail.lock.retries,
+              waited_ms: error.detail.lock.waited_ms,
+              holders: error.detail.lock.holders
+                .slice(0, POST_DEPLOY_LOCK_HOLDERS_MAX)
+                .map((h) => h.slice(0, 100)),
+            },
+          }
+        : {}),
     },
     changed: error.detail.changed,
   };
@@ -539,7 +554,12 @@ export class DeploymentController {
       if (stoppedAt !== undefined) this.lastRestartAt = d.now();
       this.drain = undefined;
       await d.record(record);
-      if (record.status === "deployed") await this.afterDeploy(record);
+      if (record.status === "deployed") {
+        // C-845: the server is up; long operations need not wait for the
+        // role sync, which may back off while the database is locked.
+        await this.unfence();
+        await this.afterDeploy(record);
+      }
     } finally {
       try {
         if (!handedOff) {
@@ -764,7 +784,12 @@ export class DeploymentController {
       this.lastRestartAt = d.now();
       this.drain = undefined;
       await d.record(record);
-      if (record.status === "deployed") await this.afterDeploy(record);
+      if (record.status === "deployed") {
+        // C-845: the server is up; long operations need not wait for the
+        // role sync, which may back off while the database is locked.
+        await this.unfence();
+        await this.afterDeploy(record);
+      }
     } finally {
       try {
         await this.unfence();

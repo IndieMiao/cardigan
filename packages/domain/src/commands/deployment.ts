@@ -182,6 +182,21 @@ export const POST_DEPLOY_STEPS: readonly PostDeployStep[] = [
 /** C-801: bounds of the host-written, already redacted post-deploy evidence. */
 export const POST_DEPLOY_ERROR_MAX = 500;
 export const POST_DEPLOY_OUTPUT_MAX = 2000;
+/** C-845: bounds of the in-sync lock wait evidence. */
+export const POST_DEPLOY_LOCK_HOLDERS_MAX = 10;
+export const POST_DEPLOY_LOCK_RETRIES_MAX = 100;
+
+/**
+ * C-845: the role sync kept finding the database locked. `retries` is how
+ * often it backed off and ran again inside this one attempt, `waited_ms` the
+ * time from its first run to giving up, and `holders` host-fixed labels (with
+ * PIDs) of the other processes that had the database open at that moment.
+ */
+export type PostDeployLockWait = {
+  readonly retries: number;
+  readonly waited_ms: number;
+  readonly holders: readonly string[];
+};
 
 /**
  * C-801: why the role refresh after a deployment did not finish, per attempt
@@ -193,6 +208,7 @@ export type DeploymentPostDeployFailure = {
     readonly step: PostDeployStep;
     readonly error: string;
     readonly output_tail?: string;
+    readonly lock_wait?: PostDeployLockWait;
   }[];
   /** Default roles whose pack changed, when the snapshots got that far. */
   readonly changed_roles?: readonly string[];
@@ -201,6 +217,27 @@ export type DeploymentPostDeployFailure = {
   /** No role changed and the standing PMs are on duty: a notice, no action. */
   readonly notice_only?: true;
 };
+
+function validLockWait(
+  value: unknown,
+  text: (v: unknown, max: number) => boolean,
+): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const w = value as Record<string, unknown>;
+  return (
+    Object.keys(w).every((k) =>
+      ["retries", "waited_ms", "holders"].includes(k),
+    ) &&
+    Number.isSafeInteger(w.retries) &&
+    Number(w.retries) >= 0 &&
+    Number(w.retries) <= POST_DEPLOY_LOCK_RETRIES_MAX &&
+    Number.isSafeInteger(w.waited_ms) &&
+    Number(w.waited_ms) >= 0 &&
+    Array.isArray(w.holders) &&
+    w.holders.length <= POST_DEPLOY_LOCK_HOLDERS_MAX &&
+    w.holders.every((h) => text(h, 100))
+  );
+}
 
 function validPostDeployFailure(
   value: unknown,
@@ -223,12 +260,14 @@ function validPostDeployFailure(
       const r = a as Record<string, unknown>;
       return (
         Object.keys(r).every((k) =>
-          ["step", "error", "output_tail"].includes(k),
+          ["step", "error", "output_tail", "lock_wait"].includes(k),
         ) &&
         POST_DEPLOY_STEPS.includes(r.step as PostDeployStep) &&
         text(r.error, POST_DEPLOY_ERROR_MAX) &&
         (r.output_tail === undefined ||
-          text(r.output_tail, POST_DEPLOY_OUTPUT_MAX))
+          text(r.output_tail, POST_DEPLOY_OUTPUT_MAX)) &&
+        (r.lock_wait === undefined ||
+          (r.step === "sync" && validLockWait(r.lock_wait, text)))
       );
     }) &&
     (f.changed_roles === undefined ||
@@ -368,6 +407,15 @@ export function recordDeployment(
                 ...(a.output_tail === undefined
                   ? {}
                   : { output_tail: a.output_tail }),
+                ...(a.lock_wait
+                  ? {
+                      lock_wait: {
+                        retries: a.lock_wait.retries,
+                        waited_ms: a.lock_wait.waited_ms,
+                        holders: [...a.lock_wait.holders],
+                      },
+                    }
+                  : {}),
               })),
               ...(postDeploy.changed_roles
                 ? { changed_roles: [...postDeploy.changed_roles] }

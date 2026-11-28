@@ -76,6 +76,15 @@ export async function readDeploymentDiagnostics(
                   ...(a.output_tail === undefined
                     ? {}
                     : { output_tail: a.output_tail }),
+                  ...(a.lock_wait
+                    ? {
+                        lock_wait: {
+                          retries: a.lock_wait.retries,
+                          waited_ms: a.lock_wait.waited_ms,
+                          holders: [...a.lock_wait.holders],
+                        },
+                      }
+                    : {}),
                 })),
                 ...(record.post_deploy_failure.changed_roles
                   ? {

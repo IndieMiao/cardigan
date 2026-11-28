@@ -1088,6 +1088,75 @@ test("C-801: post-deploy evidence is bounded, deployed-only and consistent with 
     expect(recordDeployment(state, system, r as never, ports()).ok).toBe(false);
 });
 
+test("C-845: a sync attempt may carry its bounded lock wait and holders", () => {
+  const state = fixture();
+  const system = { kind: "system" as const, project_id: state.project_id };
+  const lock_wait = {
+    retries: 5,
+    waited_ms: 71000,
+    holders: ["后台服务（pid 12）", "cardigan CLI card comment（pid 34）"],
+  };
+  const attempt = {
+    step: "sync",
+    error: "self-deploy roles 退出码 1（数据库被锁）",
+    lock_wait,
+  };
+  const failed = { ...record, post_deploy_failed: true };
+  for (const r of [
+    { ...failed, post_deploy_failure: { attempts: [attempt, attempt] } },
+    {
+      ...failed,
+      post_deploy_failure: {
+        attempts: [{ ...attempt, lock_wait: { ...lock_wait, holders: [] } }],
+      },
+    },
+  ]) {
+    const effect = value(recordDeployment(state, system, r as never, ports()));
+    expect(effect.events[0]?.payload).toMatchObject({
+      post_deploy_failure: r.post_deploy_failure,
+    });
+  }
+  for (const bad of [
+    { ...lock_wait, retries: -1 },
+    { ...lock_wait, retries: 101 },
+    { ...lock_wait, retries: 1.5 },
+    { ...lock_wait, waited_ms: -1 },
+    { ...lock_wait, waited_ms: "71000" },
+    { ...lock_wait, holders: "后台服务" },
+    { ...lock_wait, holders: [" "] },
+    { ...lock_wait, holders: ["x".repeat(101)] },
+    { ...lock_wait, holders: Array.from({ length: 11 }, (_, i) => `p${i}`) },
+    { ...lock_wait, extra: "TOKEN=synthetic" },
+    null,
+    [],
+  ])
+    expect(
+      recordDeployment(
+        state,
+        system,
+        {
+          ...failed,
+          post_deploy_failure: { attempts: [{ ...attempt, lock_wait: bad }] },
+        } as never,
+        ports(),
+      ).ok,
+    ).toBe(false);
+  // Only the sync step touches the database.
+  expect(
+    recordDeployment(
+      state,
+      system,
+      {
+        ...failed,
+        post_deploy_failure: {
+          attempts: [{ ...attempt, step: "snapshot" }],
+        },
+      } as never,
+      ports(),
+    ).ok,
+  ).toBe(false);
+});
+
 test("C-801: a deployment action for the host operator is never the owner's, and stays idempotent", () => {
   const state = fixture();
   const system = { kind: "system" as const, project_id: state.project_id };

@@ -828,6 +828,9 @@ test.runIf(process.platform === "linux").each([
         (await f.records()).find((r) => r.status === "stopping")?.stop_snapshot
           ?.runs,
       ).toHaveLength(2);
+      // C-845: without in-sync retries, as C-801 shipped; the lock is held
+      // for the whole attempt anyway.
+      f.driver.roleSyncLockRetries = 0;
       // The new server's startup writes (recovering those Runs) hold the
       // write lock while the role command runs.
       const refresh = f.driver.refreshRoles.bind(f.driver);
@@ -848,8 +851,15 @@ test.runIf(process.platform === "linux").each([
       const record = (await f.records())[0];
       const locked = {
         step: "sync",
-        error: "self-deploy roles 退出码 1（数据库被锁）",
+        error: expect.stringMatching(
+          /^self-deploy roles 退出码 1（数据库被锁）；同步内已退避重试 0 次、共等约 \d+ 秒仍被锁；打开数据库的进程：/u,
+        ),
         output_tail: expect.stringContaining("database is locked"),
+        lock_wait: {
+          retries: 0,
+          waited_ms: expect.any(Number),
+          holders: expect.any(Array),
+        },
       };
       expect(record).toMatchObject({
         attempt,

@@ -187,3 +187,25 @@ test("C-650: ready retries default to two, two minutes apart; 0 retries is allow
       parseDeploymentConfig({ ...config, ready_retry_interval_ms: value }),
     ).toThrow();
 });
+
+test("C-845: a locked role sync is retried 5 times from 2 s by default; both are configurable", () => {
+  expect(parseDeploymentConfig(config)).toMatchObject({
+    role_sync_lock_retries: 5,
+    role_sync_lock_backoff_ms: 2000,
+  });
+  expect(
+    parseDeploymentConfig({
+      ...config,
+      role_sync_lock_retries: 0,
+      role_sync_lock_backoff_ms: 1,
+    }),
+  ).toMatchObject({ role_sync_lock_retries: 0, role_sync_lock_backoff_ms: 1 });
+  for (const value of [-1, 1.5, 21, "5", null])
+    expect(() =>
+      parseDeploymentConfig({ ...config, role_sync_lock_retries: value }),
+    ).toThrow();
+  for (const value of [0, -1, 1.5, "2000", null, 600001])
+    expect(() =>
+      parseDeploymentConfig({ ...config, role_sync_lock_backoff_ms: value }),
+    ).toThrow();
+});
