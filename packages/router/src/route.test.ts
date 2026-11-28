@@ -1615,6 +1615,9 @@ test("C-370 dependency events notify PM; ready early work also notifies its actu
     "card_dependencies_attention",
     "card_dependencies_backlog_ready",
     "card_dependencies_released",
+    // C-851
+    "work_wait_cycle_detected",
+    "work_dependency_stalled",
   ])
     expect(
       recipients(

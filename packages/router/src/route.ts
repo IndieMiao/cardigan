@@ -2098,7 +2098,10 @@ export function routeEvent(input: RouteInput): RouteResult {
     case "card_dependencies_attention":
     case "card_dependencies_backlog_ready":
     case "card_dependencies_released":
-    case "card_dependencies_ready": {
+    case "card_dependencies_ready":
+    // C-851: work-item wait cycles and dependency stalls go to PM Ops.
+    case "work_wait_cycle_detected":
+    case "work_dependency_stalled": {
       if (input.event.actor.kind !== "system") break;
       const message =
         payloadString(input.event.payload, "notice") ??

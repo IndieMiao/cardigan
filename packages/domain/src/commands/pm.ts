@@ -91,6 +91,7 @@ import {
   validateCardTemplate,
   validateTemplateFlow,
 } from "./templates.js";
+import { requireNoWaitCycle } from "./work-wait-cycles.js";
 
 export type { AssignWorkItemParams } from "./assign-work-item.js";
 
@@ -1057,6 +1058,11 @@ export function createWorkItem(
               ? { target_work_item_id: p.target_work_item_id }
               : {}),
           };
+    // C-851: a new dependency, target or required verifier must not close a wait cycle.
+    requireNoWaitCycle(
+      [...d.list("work_items").filter((w) => w.card_id === card.id), item],
+      item.id,
+    );
     d.put("work_items", item);
     d.emit(
       "work_item_created",
@@ -1202,6 +1208,15 @@ export function updateWorkItem(
         ? { max_review_rounds: p.max_review_rounds }
         : {}),
     };
+    // C-851: making a verifier required adds "target waits for it"; refuse a cycle.
+    if (p.required === true && !item.required)
+      requireNoWaitCycle(
+        d
+          .list("work_items")
+          .filter((w) => w.card_id === card.id)
+          .map((w) => (w.id === result.id ? result : w)),
+        result.id,
+      );
     if (confirmReported) {
       const { reported_blocker: _confirmed, ...remaining } = result;
       result = remaining;

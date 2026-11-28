@@ -22,6 +22,7 @@ import {
   unwrap,
 } from "./core.js";
 import { workCompleted } from "./work-status.js";
+import { requireNoWaitCycle } from "./work-wait-cycles.js";
 
 /** Phase 3 can replace this boundary without exposing editing tools to Agents today. */
 export function canManageCardTemplates(actor: Actor): boolean {
@@ -150,6 +151,17 @@ export function validateCardTemplate(
     );
     earlier.add(w.key);
   }
+  // C-851: an order-respecting template can still close a wait cycle through
+  // a required verifier (e.g. a verifier that depends on a later producer).
+  const waits = definition.work_items.map((t) => ({
+    id: t.key,
+    kind: t.kind,
+    status: "todo",
+    required: t.required,
+    depends_on: t.depends_on ?? [],
+    target_work_item_id: t.target_work_item_key,
+  }));
+  for (const w of waits) requireNoWaitCycle(waits, w.id);
   ensure(
     definition.primary_work_item_key === null ||
       definition.work_items.some(
