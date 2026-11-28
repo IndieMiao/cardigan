@@ -275,6 +275,91 @@ test("conditions that would deadlock, are already met, or cannot be released are
   ).toBe("validation_failed");
 });
 
+// C-840: a follow-up that is one of the card's unfinished required work
+// items is part of finishing the card, so it never waits for the card's merge.
+const setWork = (
+  f: Fixture,
+  n: number,
+  patch: { status?: "accepted" | "passed"; required?: boolean },
+) => {
+  f.state = {
+    ...f.state,
+    work_items: f.state.work_items.map((w) =>
+      w.id === id("work_item", n) ? ({ ...w, ...patch } as typeof w) : w,
+    ),
+  };
+};
+
+test("C-840: a follow-up that the card still requires is ready now instead of waiting for the merge", () => {
+  const f = setup(false);
+  const action = f.commit(ask(f, { blocked_work_items: [id("work_item", 2)] }));
+  expect(action.follow_up_work_items).toEqual([id("work_item", 2)]);
+  expect(action.blocked_work_items).toEqual([]);
+  expect(action.ready_when).toBeUndefined();
+  expect(needs(f).human_actions.map((h) => h.id)).toEqual([action.id]);
+  expect(needs(f).later).toEqual([]);
+  // One unfinished required item among the follow-ups is enough.
+  setWork(f, 1, { status: "accepted" });
+  const mixed = f.commit(
+    ask(f, { blocked_work_items: [id("work_item", 1), id("work_item", 2)] }),
+  );
+  expect(mixed.ready_when).toBeUndefined();
+});
+
+test("C-840: post-merge follow-ups still default to the card's merge", () => {
+  const f = setup(false);
+  setWork(f, 1, { status: "accepted" });
+  setWork(f, 2, { status: "passed" });
+  setWork(f, 3, { required: false });
+  for (const n of [1, 2, 3]) {
+    const action = f.commit(
+      ask(f, { blocked_work_items: [id("work_item", n)] }),
+    );
+    expect(action.ready_when).toEqual({
+      kind: "card_merged",
+      card_id: id("card", 1),
+    });
+    expect(needs(f).later.map((l) => l.id)).toContain(action.id);
+    expect(needs(f).human_actions.map((h) => h.id)).not.toContain(action.id);
+  }
+});
+
+test("C-840: waiting for the card's merge is rejected when a follow-up is its unfinished required item", () => {
+  const f = setup(false);
+  const result = ask(f, {
+    blocked_work_items: [id("work_item", 2)],
+    ready_when: { kind: "card_merged", card_id: id("card", 1) },
+  });
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      code: "validation_failed",
+      message: expect.stringMatching(/C-1 尚未完成的必需项.*会互相等待/u),
+    },
+  });
+  // Other cards and later deliveries are still fine to wait for.
+  expect(
+    ask(f, {
+      blocked_work_items: [id("work_item", 2)],
+      ready_when: { kind: "card_merged", card_id: id("card", 2) },
+    }).ok,
+  ).toBe(true);
+  expect(
+    ask(f, {
+      blocked_work_items: [id("work_item", 2)],
+      ready_when: { kind: "card_delivery", card_id: id("card", 1) },
+    }).ok,
+  ).toBe(true);
+  // Once the item is done, waiting for the merge is a plain follow-up.
+  setWork(f, 2, { status: "passed" });
+  expect(
+    ask(f, {
+      blocked_work_items: [id("work_item", 2)],
+      ready_when: { kind: "card_merged", card_id: id("card", 1) },
+    }).ok,
+  ).toBe(true);
+});
+
 test("PM Ops triages to an external host operator with a one-line todo and releases it later", () => {
   const f = setup();
   const action = f.commit(ask(f));

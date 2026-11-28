@@ -51,6 +51,7 @@ import {
   normalizeReadyCondition,
   pausedCards,
   type ReadyConditionInput,
+  unfinishedRequiredCards,
 } from "../readiness.js";
 import { extractReferences } from "../references.js";
 import { remoteExitAction } from "../remote-worker-loss.js";
@@ -1961,7 +1962,11 @@ export function resolveDelegatedDecision(
 function readyCondition(
   d: CommandDraft,
   input: ReadyConditionInput,
-  owner: { held: readonly CardId[]; paused: readonly CardId[] },
+  owner: {
+    held: readonly CardId[];
+    paused: readonly CardId[];
+    required?: readonly CardId[];
+  },
   allowManual: boolean,
 ) {
   const result = normalizeReadyCondition(
@@ -2053,9 +2058,12 @@ export function requestHumanAction(
     const triage = hasActivePmOps(d, "triage_human_action")
       ? "pm_ops"
       : "human";
+    // C-840: work this card still needs is no post-merge follow-up; the
+    // action is ready now instead of waiting for a merge it holds up.
+    const required = unfinishedRequiredCards(items);
     const condition =
       p.ready_when ??
-      (!blocks && items.length
+      (!blocks && items.length && !required.length
         ? { kind: "card_merged" as const, card_id: p.card_id }
         : undefined);
     const readyWhen = condition
@@ -2065,6 +2073,7 @@ export function requestHumanAction(
           {
             held: blocks ? [p.card_id] : [],
             paused: blocks && items.length ? [p.card_id] : [],
+            required,
           },
           // Only PM Ops can release a manual condition.
           triage === "pm_ops",
