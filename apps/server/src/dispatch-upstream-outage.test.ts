@@ -47,7 +47,7 @@ const launch = {
  * C-821 field case: a relay without accounts; every Claude Code session of
  * that relay stops on `API Error: 503 No available accounts`.
  */
-function outage(sessions = 2) {
+function outage(sessions = 2, error: "outage" | "disconnect" = "outage") {
   const f = dispatchFixture();
   fixtures.push(f);
   const targets: { a: Assignment; run: Run }[] = [];
@@ -71,7 +71,10 @@ function outage(sessions = 2) {
   const observe = vi.fn(
     async (ref: { terminal_ref: string }, binding: PromptObservation) => ({
       ok: true as const,
-      value: !!binding.require_upstream_error && stuck.has(ref.terminal_ref),
+      value:
+        binding.require_upstream_error ===
+          (error === "disconnect" ? "disconnect" : true) &&
+        stuck.has(ref.terminal_ref),
     }),
   );
   const runtime = {
@@ -299,4 +302,108 @@ test("C-821: a session already alerted as inactive still joins the outage and is
   await t.tick();
   await t.tick();
   expect(t.sent).toHaveLength(1);
+});
+
+/**
+ * C-842 field case: the relay is fine, but one Claude Code turn ended with
+ * `API Error: Connection lost mid-response` and the CLI sat at its empty
+ * editor while the Run stayed running.
+ */
+test("C-842: a session stopped on a dropped connection is resumed once the provider answers, with a timeline record and no alert", async () => {
+  const t = outage(1, "disconnect");
+  t.recover();
+  await t.tick();
+  await t.tick();
+  await t.tick();
+  expect(t.events("run_inactive")).toEqual([]);
+  expect(t.events("upstream_outage_started")[0]?.payload).toMatchObject({
+    provider: "relay",
+    cause: "disconnect",
+  });
+  expect(t.events("upstream_outage_session_added")[0]?.payload).toMatchObject({
+    error: "disconnect",
+  });
+  expect(t.probes).toHaveBeenCalledOnce();
+  expect(t.events("upstream_outage_resolved")).toHaveLength(1);
+  expect(t.sent).toEqual([
+    `上一条回复因与模型服务 relay 的连接中断没有完成，服务现在可用。请从中断处继续当前 ${t.targets[0]!.run.id} 的工作。`,
+  ]);
+  const timeline = t.f.state().timeline.map((e) => e.body);
+  expect(timeline).toEqual(
+    expect.arrayContaining([
+      expect.stringContaining("连接在回复中途断开（本轮第 1 次"),
+      expect.stringContaining("连接中断后停住，服务现在可用"),
+    ]),
+  );
+  expect(t.f.state().human_actions).toEqual([]);
+  expect(t.runtime.release).not.toHaveBeenCalled();
+});
+
+test("C-842: no resume while the provider does not answer the probe", async () => {
+  const t = outage(1, "disconnect");
+  await t.tick();
+  t.f.advance(61_000);
+  await t.tick();
+  expect(t.events("upstream_outage_session_added")).toHaveLength(1);
+  expect(t.events("upstream_outage_resolved")).toEqual([]);
+  expect(t.sent).toEqual([]);
+  expect(t.events("run_inactive")).toEqual([]);
+});
+
+test("C-842: repeated disconnects of one Run are resumed up to the limit, then the inactivity flow alerts host ops instead of resending", async () => {
+  const t = outage(1, "disconnect");
+  const terminal = t.targets[0]!.a.runtime_ref!.terminal_ref;
+  t.recover();
+  await t.tick();
+  await t.tick();
+  await t.tick();
+  expect(t.sent).toHaveLength(1);
+  // It drops again after the resume window.
+  t.stuck.add(terminal);
+  t.f.advance(11 * 60_000);
+  await t.tick();
+  t.f.advance(61_000);
+  await t.tick();
+  await t.tick();
+  expect(t.events("upstream_outage_session_added")).toHaveLength(2);
+  expect(t.sent).toHaveLength(2);
+  expect(t.events("run_inactive")).toEqual([]);
+  // The third drop is past the default limit of two.
+  t.stuck.add(terminal);
+  t.f.advance(11 * 60_000);
+  await t.tick();
+  await t.tick();
+  expect(t.events("upstream_outage_session_added")).toHaveLength(2);
+  expect(t.sent).toHaveLength(2);
+  expect(t.events("run_inactive")).toHaveLength(1);
+  expect(t.events("run_inactive")[0]?.payload).toMatchObject({
+    run_id: t.targets[0]!.run.id,
+    reason: "mcp_inactivity",
+  });
+  for (let m = 0; m < 3; m++) {
+    t.f.advance(61_000);
+    await t.tick();
+  }
+  expect(t.sent).toHaveLength(2);
+});
+
+test("C-842: a disconnect client recovery already took is left to it", async () => {
+  const t = outage(1, "disconnect");
+  const [{ a, run }] = t.targets as [{ a: Assignment; run: Run }];
+  t.f.store.uow.run((tx) =>
+    tx.events.append(t.f.project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(t.f.project),
+      type: "client_resume_claimed",
+      actor: { kind: "system", project_id: t.f.project },
+      payload: { assignment_id: a.id, run_id: run.id },
+      created_at: t.f.clock.now(),
+    }),
+  );
+  t.recover();
+  await t.tick();
+  await t.tick();
+  expect(t.events("upstream_outage_session_added")).toEqual([]);
+  expect(t.sent).toEqual([]);
+  expect(t.events("run_inactive")).toHaveLength(1);
 });

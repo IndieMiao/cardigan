@@ -1,7 +1,7 @@
 import {
   type PromptObservation,
   type RuntimeRef,
-  upstreamApiErrorShown,
+  upstreamApiError,
 } from "@cardigan/domain";
 import type { HcClient } from "./client.js";
 
@@ -61,7 +61,10 @@ function editor(screen: string, binding: PromptObservation) {
     return false;
   if (binding.require_upstream_error) {
     while (/^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
-    return upstreamApiErrorShown(bottom);
+    return (
+      upstreamApiError(bottom) ===
+      (binding.require_upstream_error === true ? "outage" : "disconnect")
+    );
   }
   if (binding.require_disconnect === undefined) return true;
   while (/^─+$/u.test(bottom.at(-1) ?? "")) bottom.pop();
@@ -71,6 +74,14 @@ function editor(screen: string, binding: PromptObservation) {
     );
   return disconnected === binding.require_disconnect;
 }
+
+/**
+ * C-842: hc may report a CLI stopped on a model API error as `error`. Only an
+ * observation that positively requires that error above the empty editor
+ * accepts the state; the screen check itself proves the stop.
+ */
+const errorScreen = (binding: PromptObservation) =>
+  !!binding.require_upstream_error || binding.require_disconnect === true;
 
 export async function boundPrompt(
   raw: Pick<HcClient, "exec">,
@@ -107,7 +118,12 @@ export async function boundPrompt(
           labels?.assignment !== binding.assignment_id)) ||
       labels?.generation !== ref.launch_generation?.generation ||
       (ref.launch_generation && labels?.run !== ref.launch_generation.run_id) ||
-      !["unknown", "idle", "done"].includes(t.status?.state ?? "unknown")
+      ![
+        "unknown",
+        "idle",
+        "done",
+        ...(errorScreen(binding) ? ["error"] : []),
+      ].includes(t.status?.state ?? "unknown")
     )
       return;
     const program = binding.harness === "codex" ? "codex" : "claude";

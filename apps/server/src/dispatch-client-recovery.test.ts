@@ -88,6 +88,39 @@ test.each(["codex", "claude-code"] as const)(
   },
 );
 
+test("C-842: a Run the upstream outage flow took is left to that flow", async () => {
+  const { f, a, r, runtime, service, events } = disconnected("claude-code");
+  f.store.uow.run((tx) => {
+    const at = f.clock.now();
+    const started = tx.ids.nextEventId();
+    tx.events.append(f.project, {
+      id: started,
+      seq: tx.ids.nextEventSequence(f.project),
+      type: "upstream_outage_started",
+      actor: { kind: "system", project_id: f.project },
+      payload: { provider: "relay", cause: "disconnect" },
+      created_at: at,
+    });
+    tx.events.append(f.project, {
+      id: tx.ids.nextEventId(),
+      seq: tx.ids.nextEventSequence(f.project),
+      type: "upstream_outage_session_added",
+      actor: { kind: "system", project_id: f.project },
+      payload: {
+        outage_id: started,
+        provider: "relay",
+        assignment_id: a.id,
+        run_id: r.id,
+        error: "disconnect",
+      },
+      created_at: at,
+    });
+  });
+  await service().tick(f.state());
+  expect(runtime.wake).not.toHaveBeenCalled();
+  expect(events("client_resume_claimed")).toEqual([]);
+});
+
 test.each([
   "mcp",
   "waiting",

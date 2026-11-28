@@ -178,6 +178,8 @@ export const launchConfigSchema = z.strictObject({
       probe_interval_ms: positiveMillis.optional(),
       remind_after_ms: positiveMillis.optional(),
       resume_window_ms: positiveMillis.optional(),
+      /** C-842: resume messages one Run may get for dropped connections. */
+      disconnect_resume_limit: z.number().int().min(0).max(10).optional(),
     })
     .optional(),
 });

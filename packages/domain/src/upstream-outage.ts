@@ -16,6 +16,13 @@ import type { AssignmentId, CardId, EventId, RunId } from "./ids.js";
  * - `upstream_outage_resolved` (project stream): the probe answered.
  * - `upstream_outage_resume` (card stream): the one resume attempt per Run.
  * - `upstream_outage_reminded` (project stream): the single Needs You reminder.
+ *
+ * C-842: a session stopped on a dropped connection ("Connection lost
+ * mid-response", "stream disconnected") at its empty editor joins the same
+ * flow with `error: "disconnect"`: Claude Code does not retry it on its own,
+ * so the provider is probed and the session gets one resume message. Unlike
+ * an outage a Run may come back for another disconnect, at most
+ * `disconnect_resume_limit` times; after that the inactivity flow applies.
  */
 export interface UpstreamOutagePolicy {
   /** Between two recovery probes of one provider. */
@@ -24,12 +31,37 @@ export interface UpstreamOutagePolicy {
   readonly remind_after_ms: number;
   /** After recovery, how long a stopped session stays reserved for its resume. */
   readonly resume_window_ms: number;
+  /** C-842: resume messages one Run may get for dropped connections. */
+  readonly disconnect_resume_limit: number;
 }
 export const DEFAULT_UPSTREAM_OUTAGE_POLICY: UpstreamOutagePolicy = {
   probe_interval_ms: 60_000,
   remind_after_ms: 30 * 60_000,
   resume_window_ms: 10 * 60_000,
+  disconnect_resume_limit: 2,
 };
+
+/** The policy with the configured values over the defaults. */
+export function resolveUpstreamOutagePolicy(
+  set:
+    | { readonly [K in keyof UpstreamOutagePolicy]?: number | undefined }
+    | undefined,
+): UpstreamOutagePolicy {
+  const d = DEFAULT_UPSTREAM_OUTAGE_POLICY;
+  return {
+    probe_interval_ms: set?.probe_interval_ms ?? d.probe_interval_ms,
+    remind_after_ms: set?.remind_after_ms ?? d.remind_after_ms,
+    resume_window_ms: set?.resume_window_ms ?? d.resume_window_ms,
+    disconnect_resume_limit:
+      set?.disconnect_resume_limit ?? d.disconnect_resume_limit,
+  };
+}
+
+/**
+ * The model API error a session stopped on: an outage of the service (5xx,
+ * 429, "No available accounts", overloaded) or (C-842) a dropped connection.
+ */
+export type UpstreamApiError = "outage" | "disconnect";
 
 export type UpstreamOutageResumeResult =
   /** Claimed immediately before the send; at most one per Run and outage. */
@@ -46,6 +78,8 @@ export interface UpstreamOutageSession {
   readonly run_id: RunId;
   readonly card_id?: CardId;
   readonly profile?: string;
+  /** C-842: absent for an outage error. */
+  readonly error?: "disconnect";
   readonly at: string;
   readonly resume?: {
     readonly result: UpstreamOutageResumeResult;
@@ -55,6 +89,8 @@ export interface UpstreamOutageSession {
 export interface UpstreamOutage {
   readonly id: EventId;
   readonly provider: string;
+  /** C-842: the first session stopped on a dropped connection. */
+  readonly cause?: "disconnect";
   readonly started_at: string;
   readonly sessions: readonly UpstreamOutageSession[];
   readonly resolved_at?: string;
@@ -127,6 +163,9 @@ function buildOutages(events: readonly Event[]): readonly UpstreamOutage[] {
         run_id,
         ...(e.card_id ? { card_id: e.card_id } : {}),
         ...(profile ? { profile } : {}),
+        ...(text(e, "error") === "disconnect"
+          ? { error: "disconnect" as const }
+          : {}),
         at: e.created_at,
         ...(resume ? { resume } : {}),
       });
@@ -137,6 +176,9 @@ function buildOutages(events: readonly Event[]): readonly UpstreamOutage[] {
     return {
       id: start.id,
       provider: text(start, "provider") ?? "",
+      ...(text(start, "cause") === "disconnect"
+        ? { cause: "disconnect" as const }
+        : {}),
       started_at: start.created_at,
       sessions,
       ...(end ? { resolved_at: end.created_at } : {}),
@@ -163,6 +205,44 @@ export function upstreamOutageOfRun(
   return upstreamOutages(state).findLast((o) =>
     o.sessions.some((s) => s.run_id === run),
   );
+}
+
+/**
+ * Whether a stop of this Run on `error` may join an outage. A Run stops on
+ * an outage error at most once, so a repeating error cannot loop resumes.
+ * C-842: it may stop again only while every earlier stop was a dropped
+ * connection whose outage ended and whose resume was attempted, and only up
+ * to `limit` dropped connections.
+ */
+export function upstreamOutageJoinAllowed(
+  state: Pick<CommandState, "events">,
+  run: RunId,
+  error: UpstreamApiError,
+  limit: number = DEFAULT_UPSTREAM_OUTAGE_POLICY.disconnect_resume_limit,
+) {
+  const earlier = upstreamOutages(state).flatMap((o) =>
+    o.sessions
+      .filter((s) => s.run_id === run)
+      .map((s) => ({ outage: o, session: s })),
+  );
+  return (
+    (error === "disconnect" ? earlier.length < limit : true) &&
+    earlier.every(
+      (x) =>
+        x.session.error === "disconnect" &&
+        !!x.outage.resolved_at &&
+        !!x.session.resume,
+    )
+  );
+}
+/** C-842: how many times this Run stopped on a dropped connection. */
+export function upstreamDisconnectCount(
+  state: Pick<CommandState, "events">,
+  run: RunId,
+) {
+  return upstreamOutages(state).filter((o) =>
+    o.sessions.some((s) => s.run_id === run && s.error === "disconnect"),
+  ).length;
 }
 
 /**
@@ -216,37 +296,44 @@ export function runHeldByUpstreamOutage(
 const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/gu;
 /** The first line of a model API error as Claude Code or Codex prints it. */
 const ERROR_START =
-  /^(?:[⎿●■⚠✗✘]\s*)*(?:API Error\b|unexpected status\b|stream error\b|exceeded retry limit\b)/iu;
+  /^(?:[⎿●■⚠✗✘]\s*)*(?:API Error\b|unexpected status\b|stream error\b|stream disconnected\b|exceeded retry limit\b)/iu;
 /** A new message, prompt or spinner: the error is not the last thing shown. */
 const NEW_BLOCK = /^(?:[●⏺>›❯✻✶✳✢·*]\s|[●⏺✻✶✳✢]$)/u;
 const STATUS =
   /(?:API Error:?|unexpected status|last status:?)\s*\(?(\d{3})\b/iu;
 const OUTAGE_TEXT =
   /No available accounts|overloaded|Service Unavailable|Bad Gateway|Gateway Timeout/iu;
-const NOT_OUTAGE = /Connection lost mid-response|stream disconnected/iu;
+const DISCONNECT = /Connection lost mid-response|stream disconnected/iu;
 const SCAN_LINES = 12;
 
 /**
- * C-821: whether the lines directly above an empty editor end with a model
- * API outage error (5xx, 429, "No available accounts", overloaded). The text
- * is only matched, never returned. A disconnect belongs to client recovery;
- * an authentication or request error is not an outage.
+ * C-821: which model API error the lines directly above an empty editor end
+ * with: an outage (5xx, 429, "No available accounts", overloaded) or (C-842)
+ * a dropped connection. The text is only matched, never returned. An
+ * authentication or request error is neither.
  */
-export function upstreamApiErrorShown(lines: readonly string[]): boolean {
+export function upstreamApiError(
+  lines: readonly string[],
+): UpstreamApiError | undefined {
   const recent = lines
     .map((line) => line.replace(ANSI, "").trim())
     .filter(Boolean)
     .slice(-SCAN_LINES);
   const start = recent.findLastIndex((line) => ERROR_START.test(line));
-  if (start < 0) return false;
+  if (start < 0) return;
   const block = recent.slice(start);
-  if (block.slice(1).some((line) => NEW_BLOCK.test(line))) return false;
+  if (block.slice(1).some((line) => NEW_BLOCK.test(line))) return;
   const joined = block.join(" ");
-  if (NOT_OUTAGE.test(joined)) return false;
+  if (DISCONNECT.test(joined)) return "disconnect";
   const status = Number(joined.match(STATUS)?.[1]);
-  return (
-    (status >= 500 && status <= 599) ||
+  return (status >= 500 && status <= 599) ||
     status === 429 ||
     OUTAGE_TEXT.test(joined)
-  );
+    ? "outage"
+    : undefined;
+}
+
+/** C-821: the lines above an empty editor end with a model API outage error. */
+export function upstreamApiErrorShown(lines: readonly string[]): boolean {
+  return upstreamApiError(lines) === "outage";
 }
