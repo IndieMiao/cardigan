@@ -438,6 +438,13 @@ export class HostOpsService {
             dispatchedAt(loadCommandState(tx, project), run),
           )
         : undefined;
+    // C-849: a session reused after its launch Run (or an idle one) keeps
+    // the launch Run's enrolled CLI receipt; the collector re-proves it.
+    const launchRun = assignment.runtime_ref?.launch_generation?.run_id;
+    const sessionLaunch =
+      launchRun && launchRun !== run?.id
+        ? store.uow.read((tx) => tx.runs.get(project, launchRun))
+        : undefined;
     const result = await inspectWorker(
       execution,
       project,
@@ -448,6 +455,7 @@ export class HostOpsService {
       harness,
       this.options.runtime,
       since ? { since } : undefined,
+      sessionLaunch,
     );
     context.revalidateToken?.();
     const fresh = store.uow.read((tx) => {

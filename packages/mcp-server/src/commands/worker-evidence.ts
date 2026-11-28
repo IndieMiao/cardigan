@@ -47,6 +47,9 @@ export const workerUnavailableReasons = [
   "session_not_published",
   "launch_markers_unreadable",
   "transcript_unreadable",
+  // activity (C-849): hc has no status for a live CLI that never reports it
+  "activity_not_reported",
+  "activity_unrecognized",
   // host side: the collector was not asked for live facts
   "run_not_current",
   "session_not_bound",
@@ -153,6 +156,7 @@ export const workerEvidence = z.object({
       terminals: unavailableReason.optional(),
       processes: unavailableReason.optional(),
       events: unavailableReason.optional(),
+      activity: unavailableReason.optional(),
     })
     .optional(),
   /** C-806: only when asked for a failed launch. The host redacts the text

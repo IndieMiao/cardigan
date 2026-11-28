@@ -41,7 +41,9 @@ type LiveField = "terminals" | "processes" | "events";
 function unavailableFields(
   evidence: Record<LiveField, unknown> & {
     unavailable?:
-      | { [K in LiveField]?: WorkerUnavailableReason | undefined }
+      | {
+          [K in LiveField | "activity"]?: WorkerUnavailableReason | undefined;
+        }
       | undefined;
   },
   live: boolean,
@@ -52,11 +54,29 @@ function unavailableFields(
     : current
       ? "session_not_bound"
       : "run_not_current";
-  const reasons: Partial<Record<LiveField, WorkerUnavailableReason>> = {};
+  const reasons: Partial<
+    Record<LiveField | "activity" | "last_activity_at", WorkerUnavailableReason>
+  > = {};
   for (const field of ["terminals", "processes", "events"] as const)
     if (host || evidence[field] === null)
       reasons[field] = host ?? evidence.unavailable?.[field] ?? "other";
+  // C-849: a live terminal without activity names why (the CLI never
+  // reports it to hc); the last activity time then comes from the
+  // transcript, and names the events reason when that is unreadable too.
+  if (live && evidence.unavailable?.activity)
+    reasons.activity = evidence.unavailable.activity;
+  if (host || !lastActivityAt(evidence.events))
+    reasons.last_activity_at = host ?? reasons.events ?? "other";
   return reasons;
+}
+
+/** C-849: the newest transcript event time, the session's last activity. */
+function lastActivityAt(events: unknown) {
+  if (!Array.isArray(events)) return null;
+  let latest: string | null = null;
+  for (const e of events as { time: string }[])
+    if (!latest || Date.parse(e.time) > Date.parse(latest)) latest = e.time;
+  return latest;
 }
 
 /** Collect files/processes only via the selected isolated account; native
@@ -72,6 +92,8 @@ export async function inspectWorker(
   runtime?: Runtime,
   /** C-806: also collect a failed launch's evidence (from `since`). */
   launch?: { since: string },
+  /** C-849: the Run that launched the resident session, when it is not `run`. */
+  sessionLaunch?: Run,
 ) {
   const target = execution.target;
   if (!target) throw unavailable("worker_binding_missing");
@@ -129,6 +151,7 @@ export async function inspectWorker(
     return {
       source: "local_runtime",
       session_launch_run_id: ref.launch_generation?.run_id ?? null,
+      last_activity_at: null,
       terminals: [
         {
           address: ref.terminal_ref,
@@ -145,6 +168,7 @@ export async function inspectWorker(
       unavailable: {
         processes: "local_runtime_only",
         events: "local_runtime_only",
+        last_activity_at: "local_runtime_only",
       },
     };
   }
@@ -188,6 +212,25 @@ export async function inspectWorker(
   )
     throw unavailable("invalid_probe_identity");
   const live = current && (!!ref || !!pub);
+  // C-849: an idle or reused session has no publication of its own. Its
+  // launch Run's enrolled CLI receipt (same checks as the retirement path)
+  // lets the collector list the CLI under the terminal's own program; hc
+  // reports only that program on a macOS worker (C-690).
+  const launched = sessionLaunch?.launch_publication;
+  const sessionProcess =
+    !pub &&
+    ref &&
+    ref === resident &&
+    ref.launch_generation &&
+    sessionLaunch?.id === ref.launch_generation.run_id &&
+    sessionLaunch.assignment_id === a.id &&
+    launched?.generation === ref.launch_generation.generation &&
+    launched.target.fingerprint === target.fingerprint &&
+    launched.runtime_ref?.terminal_ref === ref.terminal_ref &&
+    launched.process?.terminal === ref.launch_generation.generation &&
+    launched.process.machine === target.fingerprint
+      ? launched.process
+      : null;
   const payload = {
     project,
     platform,
@@ -204,7 +247,7 @@ export async function inspectWorker(
     generation,
     launch_run: launchRun ?? null,
     terminal: terminal ?? null,
-    process: pub?.process ?? null,
+    process: pub?.process ?? sessionProcess,
     target: target.fingerprint,
     // C-823: the Run's id lets the collector find its own (possibly
     // finished) terminal when the Run no longer holds the session.
@@ -283,6 +326,7 @@ export async function inspectWorker(
       ...evidence,
       ...(launch && worker ? { launch: redactWorkerLaunch(worker) } : {}),
       session_launch_run_id: launchRun ?? null,
+      last_activity_at: live ? lastActivityAt(evidence.events) : null,
       ...(!live ? { terminals: null, processes: null, events: null } : {}),
       unavailable: unavailableFields(evidence, live, current),
       helpers: await Promise.all(

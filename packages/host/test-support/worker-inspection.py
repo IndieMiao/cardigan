@@ -118,6 +118,9 @@ class CollectorTest(unittest.TestCase):
             self.assertEqual(requests[-2][1],{'terminal':'t2','lines':0})
             if change != 'exit':
                 self.assertEqual(rows[0]['screen'],['[redacted]']*11+['working'])
+                # C-849: no status from hc is named, not a failed read; a
+                # finished terminal has no activity to name.
+                self.assertEqual(rows[0].get('_activity'), None if change == 'no_candidates' else 'activity_not_reported')
             if launch:
                 # C-806: the failed launch's own tail, bounded; the CLI's resources.
                 self.assertEqual(rows[0]['launch'], dict(state='live', tail=['old']*18+['secret material','Working (esc to interrupt)'],
@@ -214,6 +217,38 @@ class CollectorTest(unittest.TestCase):
                 with patch.dict(probe['main'].__globals__, native=primitives, terminals=lambda *args: ([], [])):
                     self.assertEqual(probe['main'](dict(conf, process=dict(saved, terminal='other')))['unavailable'],
                                      dict(terminals='terminal_not_registered'))
+
+    def test_owner_session_lists_enrolled_cli_and_names_absent_activity(self):
+        # C-849: on a macOS worker hc reports only the idle owner (the
+        # terminal's own program). The journaled CLI receipt, re-proved by
+        # its birth identity, is listed with it; a live terminal without
+        # activity names why instead of leaving a bare null.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw).resolve()
+            generation = 'b' * 32
+            folder = root/'runs/fixture/A-1/generations'/generation
+            folder.mkdir(parents=True)
+            (folder/'identity').write_text(json.dumps(dict(version=1,assignment='A-1',project='fixture',run='R-1',target='pin',generation=generation)))
+            (folder/'published').touch()
+            conf = dict(root=str(root),project='fixture',assignment='A-1',generation=generation,session='s',target='pin',
+                        user='worker',gid=3333,terminal='t2',harness='claude-code',local=False,live=True,platform='darwin',launch_run='R-1',
+                        helpers=[None,None,None],process=None)
+            user=SimpleNamespace(pw_name='worker',pw_gid=3333,pw_dir=root)
+            saved = dict(machine='pin', terminal=generation, uid=3333, pid=54997, process_group=54989, start='one')
+            owner = dict(pid=54989, elapsed='10:00', cpu=0.0, command='python3 [redacted] -c [redacted] [redacted]')
+            cli = dict(pid=54997, elapsed='09:59', cpu=0.0, command='claude [redacted] [redacted] [redacted] [redacted]')
+            row = dict(address='t2', state='live', activity=None, screen=[], _activity='activity_not_reported')
+            primitives = dict(project_account=lambda _: None, identity=lambda *args: saved)
+            with patch('platform.system',return_value='Darwin'), patch('pwd.getpwuid',return_value=user), patch('grp.getgrgid',return_value=SimpleNamespace(gr_name='worker')), \
+                    patch('os.geteuid',return_value=3333), patch('os.getuid',return_value=3333), patch('os.getegid',return_value=3333), \
+                    patch.dict(probe['main'].__globals__, native=primitives, terminals=lambda *args: ([dict(row)], [owner]),
+                               process=lambda pid: [cli] if pid == 54997 else []):
+                idle = probe['main'](dict(conf, process=saved))
+                self.assertEqual(idle['processes'], [owner, cli])
+                self.assertEqual(idle['terminals'], [dict(address='t2', state='live', activity=None, screen=[])])
+                self.assertEqual(idle['unavailable'], dict(activity='activity_not_reported', events='transcript_unreadable'))
+                # Without the receipt only the owner is visible, as before.
+                self.assertEqual(probe['main'](conf)['processes'], [owner])
 
     def test_unavailable_reasons_are_bounded_codes(self):
         # C-746: a failed read maps to a fixed code; no message text crosses.

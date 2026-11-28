@@ -229,12 +229,11 @@ test.each([
     // C-746: every null live field names why; a present one names nothing.
     expect(result.unavailable).toEqual(
       live
-        ? { terminals: "other", events: "other" }
+        ? { terminals: "other", events: "other", last_activity_at: "other" }
         : Object.fromEntries(
-            ["terminals", "processes", "events"].map((k) => [
-              k,
-              current ? "session_not_bound" : "run_not_current",
-            ]),
+            ["terminals", "processes", "events", "last_activity_at"].map(
+              (k) => [k, current ? "session_not_bound" : "run_not_current"],
+            ),
           ),
     );
   },
@@ -281,6 +280,7 @@ test("C-746: inspecting an idle remote session names why each field is null inst
       terminals: "run_not_current",
       processes: "run_not_current",
       events: "run_not_current",
+      last_activity_at: "run_not_current",
     },
   });
   // The unqualified query of the idle Assignment reads the live facts; the
@@ -306,8 +306,116 @@ test("C-746: inspecting an idle remote session names why each field is null inst
     terminals: "core_error",
     processes: "process_identity_changed",
     events: "other",
+    last_activity_at: "other",
   });
   expect(JSON.stringify(idle)).not.toContain("/private/path");
+});
+test("C-849: an idle remote session lists its launch Run's enrolled CLI and names absent activity", async () => {
+  const { execution, a, target } = worker("remote-worker");
+  const generation = "d".repeat(32);
+  const runtime_ref = {
+    target,
+    runtime_machine: "binding",
+    machine_id: "remote-worker",
+    terminal_ref: "binding/t9",
+    agent_name: "agent",
+    launch_generation: { run_id: unwrap(formatId("run", 6666)), generation },
+  };
+  const owner = { ...a, runtime_ref };
+  const process = {
+    machine: target.fingerprint,
+    boot: "boot",
+    uid: 501,
+    pid: 54997,
+    start: "start",
+    process_group: 54989,
+    terminal: generation,
+  };
+  const launch = {
+    id: "R-6666",
+    assignment_id: "A-1",
+    status: "completed",
+    launch_publication: {
+      generation,
+      target,
+      runtime_ref,
+      process,
+    },
+  } as unknown as Run;
+  const events = [
+    { type: "assistant", time: "2026-11-28T10:49:58Z" },
+    { type: "result", time: "2026-11-28T10:50:01Z" },
+  ];
+  const collect = (expected: unknown) =>
+    vi.mocked(agentProcessCommand).mockResolvedValueOnce(
+      transport(
+        `let s='';process.stdin.on('data',x=>s+=x).on('end',()=>{const p=JSON.parse(s);if(JSON.stringify(p.process)!==${JSON.stringify(JSON.stringify(expected))})process.exit(2);console.log(JSON.stringify(${JSON.stringify(
+          {
+            ...reply,
+            terminals: [
+              { address: "t9", state: "live", activity: null, screen: [] },
+            ],
+            events,
+            unavailable: { activity: "activity_not_reported" },
+          },
+        )}))})`,
+      ),
+    );
+  collect(process);
+  const idle = await inspectWorker(
+    execution,
+    project,
+    owner,
+    undefined,
+    true,
+    "darwin",
+    "claude-code",
+    undefined,
+    undefined,
+    launch,
+  );
+  expect(idle.unavailable).toEqual({ activity: "activity_not_reported" });
+  expect(idle.last_activity_at).toBe("2026-11-28T10:50:01Z");
+  // A receipt of another generation, terminal, Assignment or target is not sent.
+  for (const changed of [
+    { ...launch, assignment_id: "A-2" },
+    { ...launch, id: "R-1" },
+    {
+      ...launch,
+      launch_publication: {
+        ...launch.launch_publication,
+        process: { ...process, terminal: "e".repeat(32) },
+      },
+    },
+    {
+      ...launch,
+      launch_publication: {
+        ...launch.launch_publication,
+        runtime_ref: { ...runtime_ref, terminal_ref: "binding/t8" },
+      },
+    },
+    {
+      ...launch,
+      launch_publication: {
+        ...launch.launch_publication,
+        process: { ...process, machine: "f".repeat(64) },
+      },
+    },
+  ] as Run[]) {
+    collect(null);
+    await inspectWorker(
+      execution,
+      project,
+      owner,
+      undefined,
+      true,
+      "darwin",
+      "claude-code",
+      undefined,
+      undefined,
+      changed,
+    );
+  }
 });
 test.each(["alive", "exited", "unknown"] as const)(
   "native local: only exact hc evidence is exposed (%s)",
