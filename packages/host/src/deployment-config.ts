@@ -26,6 +26,10 @@ export interface DeploymentConfig {
   readonly ready_retry_max?: number;
   /** C-650: minimum gap between those retries. */
   readonly ready_retry_interval_ms?: number;
+  /** C-845: in-sync retries of the role sync while the database is locked. */
+  readonly role_sync_lock_retries?: number;
+  /** C-845: first backoff before such a retry; doubles, capped at 8×. */
+  readonly role_sync_lock_backoff_ms?: number;
   readonly retention?: RetentionPolicy;
   readonly disk_low_percent?: number;
   /** C-656: alert when /tmp use exceeds this percent. */
@@ -58,6 +62,13 @@ export const DEFAULT_OPERATION_WAIT_TIMEOUT_MS = 15 * 60 * 1000;
 export const DEFAULT_READY_RETRY_MAX = 2;
 /** C-650: a transient write lock is long gone two minutes later. */
 export const DEFAULT_READY_RETRY_INTERVAL_MS = 2 * 60 * 1000;
+/** C-845: retries of a locked role sync inside one refresh (46 s of backoff). */
+export const DEFAULT_ROLE_SYNC_LOCK_RETRIES = 5;
+export const MAX_ROLE_SYNC_LOCK_RETRIES = 20;
+/** C-845: backoffs 2, 4, 8, 16, 16 s with the default retries. */
+export const DEFAULT_ROLE_SYNC_LOCK_BACKOFF_MS = 2000;
+/** C-845: a single backoff never exceeds eight times the first one. */
+export const ROLE_SYNC_LOCK_BACKOFF_CAP = 8;
 /** Optional keys where 0 turns the C-609 behavior off. */
 const DISABLEABLE = ["batch_window_ms", "operation_wait_timeout_ms"];
 
@@ -112,6 +123,8 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     "operation_wait_timeout_ms",
     "ready_retry_max",
     "ready_retry_interval_ms",
+    "role_sync_lock_retries",
+    "role_sync_lock_backoff_ms",
     "retention",
     "disk_low_percent",
     "tmp_high_percent",
@@ -148,6 +161,7 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
           "evidence_wait_timeout_ms",
           "capacity_wait_timeout_ms",
           "ready_retry_interval_ms",
+          "role_sync_lock_backoff_ms",
         ].includes(key) && value[key] === undefined
       ) &&
       (!Number.isSafeInteger(value[key]) ||
@@ -185,6 +199,18 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
   )
     throw new Error("Invalid deployment retry count");
   if (
+    value.role_sync_lock_retries !== undefined &&
+    (!Number.isSafeInteger(value.role_sync_lock_retries) ||
+      Number(value.role_sync_lock_retries) < 0 ||
+      Number(value.role_sync_lock_retries) > MAX_ROLE_SYNC_LOCK_RETRIES)
+  )
+    throw new Error("Invalid role sync retry count");
+  if (
+    value.role_sync_lock_backoff_ms !== undefined &&
+    Number(value.role_sync_lock_backoff_ms) > 10 * 60 * 1000
+  )
+    throw new Error("Invalid role sync backoff");
+  if (
     value.disk_low_percent !== undefined &&
     (!Number.isInteger(value.disk_low_percent) ||
       Number(value.disk_low_percent) < 1 ||
@@ -218,6 +244,10 @@ export function parseDeploymentConfig(raw: unknown): DeploymentConfig {
     ready_retry_max: value.ready_retry_max ?? DEFAULT_READY_RETRY_MAX,
     ready_retry_interval_ms:
       value.ready_retry_interval_ms ?? DEFAULT_READY_RETRY_INTERVAL_MS,
+    role_sync_lock_retries:
+      value.role_sync_lock_retries ?? DEFAULT_ROLE_SYNC_LOCK_RETRIES,
+    role_sync_lock_backoff_ms:
+      value.role_sync_lock_backoff_ms ?? DEFAULT_ROLE_SYNC_LOCK_BACKOFF_MS,
   } as unknown as DeploymentConfig;
 }
 

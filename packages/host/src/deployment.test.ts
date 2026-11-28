@@ -843,3 +843,98 @@ test("C-801: an unrecognised exception keeps no text; a driver without on-duty c
     },
   });
 });
+
+test("C-845: ready, downtime and the operation fence never wait for the role sync", async () => {
+  const f = fixture();
+  let fenced = false;
+  f.driver.fenceOperations = async () => {
+    fenced = true;
+    f.calls.push("fence");
+    return [];
+  };
+  f.driver.releaseOperationFence = async () => {
+    fenced = false;
+    f.calls.push("unfence");
+  };
+  let finish: () => void = () => {};
+  let seen: { records: DeploymentRecord[]; fenced: boolean } | undefined;
+  f.driver.refreshRoles = async () => {
+    seen = { records: [...f.records], fenced };
+    f.calls.push("roles");
+    // The sync backs off while the database is locked.
+    await new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  };
+  const tick = new DeploymentController(f.driver).tick();
+  await vi.waitFor(() => expect(seen).toBeDefined());
+  expect(seen?.fenced).toBe(false);
+  expect(seen?.records.at(-1)).toMatchObject({
+    status: "deployed",
+    ready: true,
+    summary: expect.stringContaining("ready 和两个端口核对通过"),
+  });
+  const downtime = seen?.records.at(-1)?.downtime_ms;
+  finish();
+  await tick;
+  // A sync that finishes inside its own backoff leaves no post-deploy failure.
+  expect(f.records.at(-1)).toMatchObject({
+    status: "deployed",
+    downtime_ms: downtime,
+  });
+  expect(f.records.at(-1)?.post_deploy_failure).toBeUndefined();
+  expect(f.calls.indexOf("unfence")).toBeLessThan(f.calls.indexOf("roles"));
+  expect(f.calls.filter((c) => c === "unfence")).toHaveLength(1);
+  expect(f.calls.at(-1)).toBe("unlock");
+});
+
+test("C-845: a sync that stayed locked records its wait and holders and still goes to the host operator", async () => {
+  const f = fixture();
+  const driver = f.driver as DeploymentDriver & {
+    roleRefreshRetryMs: number;
+  };
+  driver.roleRefreshRetryMs = 1;
+  driver.standingPmOnDuty = async () => true;
+  const lock = {
+    retries: 5,
+    waited_ms: 71_000,
+    holders: ["后台服务（pid 12）", "cardigan CLI card comment（pid 34）"],
+  };
+  const message =
+    "self-deploy roles 退出码 1（数据库被锁）；同步内已退避重试 5 次、共等约 71 秒仍被锁；打开数据库的进程：后台服务（pid 12）、cardigan CLI card comment（pid 34）";
+  f.driver.refreshRoles = async () => {
+    throw new RoleRefreshFailed("sync", message, {
+      output: "Error: database is locked",
+      changed: ["pm"],
+      lock,
+    });
+  };
+  await new DeploymentController(f.driver).tick();
+  const attempt = {
+    step: "sync",
+    error: message,
+    output_tail: "Error: database is locked",
+    lock_wait: lock,
+  };
+  expect(f.records.at(-1)).toMatchObject({
+    status: "deployed",
+    post_deploy_failed: true,
+    summary: expect.stringContaining("共等约 71 秒仍被锁"),
+    post_deploy_failure: { attempts: [attempt, attempt] },
+  });
+  expect(f.records.at(-1)?.post_deploy_failure?.notice_only).toBeUndefined();
+  // Only the sync step carries a lock wait.
+  f.driver.refreshRoles = async () => {
+    throw new RoleRefreshFailed("snapshot", "当前版本角色包快照输出无法解析", {
+      lock,
+    } as never);
+  };
+  const g = fixture();
+  g.driver.refreshRoles = f.driver.refreshRoles;
+  await new DeploymentController(g.driver).tick();
+  expect(
+    g.records
+      .at(-1)
+      ?.post_deploy_failure?.attempts.every((a) => a.lock_wait === undefined),
+  ).toBe(true);
+});
