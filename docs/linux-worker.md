@@ -30,6 +30,7 @@ Steam Deck 等根分区只读的设备另见 [SteamOS 设备接入](steamos-work
 
 - 有 `python3` 和 `curl`。
 - 装好 Tailscale 并登录同一个 tailnet。tailnet 访问规则放行两个方向：控制主机 → 设备的 TCP 22，设备 → 控制主机的 Serve 端口（写法见[第 4 节](#4-worker资源与-mcp)）。
+- tailnet 访问规则按设备逐条放行：**每接一台新设备，都要在 Tailscale 后台单独加一条“控制主机 → 该设备:22”**，已有设备的规则不会覆盖新设备。漏了这条时，配对、确认和初始化都能走完，检查却停在 SSH（`worker_ssh_blocked`）。排查：设备上执行 `sudo journalctl -u tailscaled --since -10min | grep 'no rules matched'`，出现 `Drop: TCP{<控制主机地址> > <设备地址>:22} no rules matched` 就是这条规则没放行；加上后点“继续检查”，设备上不用改动（C-709 Steam Deck 实测）。
 - SSH 服务已启用（**要 sudo**），例如 `sudo systemctl enable --now ssh`，有的发行版服务名是 `sshd`。
 - 你在设备上的账号能用 sudo（第 4、5 步用）。
 
@@ -49,6 +50,8 @@ curl -fsS https://<Workbench>/pair-device.py | python3 - https://<Workbench>
 - 提示：本机 22 端口没有 SSH 服务、正在用电池。只提示，不会停下。
 
 之后命令在设备上等待确认。没装或没登录 Tailscale 时给出指引后退出；也可以用 `--address <地址>` 指定控制主机连这台设备用的地址。配对这一步不改动设备。
+
+配对只经 HTTPS 连 Workbench，不检验“控制主机 → 本机:22”。新设备先按第 0 步在 Tailscale 后台加上这台设备的放行规则；之后检查停在 SSH 时，用第 0 步的 tailscaled 日志方法排查。
 
 ### 2. 控制主机：登记设备的 SSH 主机公钥（不要 sudo）
 
