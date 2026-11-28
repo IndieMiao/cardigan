@@ -43,6 +43,10 @@ import {
   agentToolsGuidance,
 } from "./agent-tools-maintenance.js";
 import {
+  type DevicePresenceOptions,
+  refreshDevicePresence,
+} from "./device-presence.js";
+import {
   type MachineObservationOptions,
   refreshMachineObservations,
 } from "./machine-capabilities.js";
@@ -989,6 +993,23 @@ export class RuntimeTargets implements Runtime {
         );
       },
     );
+  }
+  /** C-841: between machine checks, whether enabled unleased devices are still there. */
+  refreshDevicePresence(
+    project: ProjectId,
+    machine: string,
+    overrides: Pick<
+      DevicePresenceOptions,
+      "probe" | "providers" | "now" | "signal"
+    > = {},
+  ) {
+    return refreshDevicePresence({
+      store: this.options.store,
+      project,
+      machine,
+      target: () => this.resolve(project, machine),
+      ...overrides,
+    });
   }
   executionForRef(ref: RuntimeRef, project?: ProjectId): ExecutionConfig {
     return this.targetForRef(ref, project).execution;

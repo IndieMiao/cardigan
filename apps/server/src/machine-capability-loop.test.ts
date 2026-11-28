@@ -1,7 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DeviceRegistry, MACHINE_CAPABILITY_INTERVAL_MS } from "@cardigan/host";
+import {
+  DEVICE_PRESENCE_INTERVAL_MS,
+  DeviceRegistry,
+  MACHINE_CAPABILITY_INTERVAL_MS,
+} from "@cardigan/host";
 import { Store } from "@cardigan/store";
 import { expect, test, vi } from "vitest";
 import {
@@ -186,6 +190,62 @@ test("C-817: a device a person enabled is initialized by its project's check wit
     refreshMachine.mockClear();
     await vi.advanceTimersByTimeAsync(DEVICE_INIT_FOLLOWUP_MS);
     expect(refreshMachine).not.toHaveBeenCalled();
+  } finally {
+    await loop.stop();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+    vi.useRealTimers();
+  }
+});
+
+test("C-841: device presence is checked for every project's machines each minute between patrols, after the patrol and never at once with it", async () => {
+  vi.useFakeTimers();
+  const root = mkdtempSync(join(tmpdir(), "capability-presence-"));
+  const store = Store.open({ dataDir: root });
+  store.createProject({ id: "a" });
+  store.createProject({ id: "b" });
+  let patrolling = false;
+  const refreshMachine = vi.fn(async () => {
+    patrolling = true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    patrolling = false;
+    return { capabilities: [], health: null };
+  });
+  const overlapped = vi.fn();
+  const refreshDevicePresence = vi.fn(
+    async (
+      _project: string,
+      _machine: string,
+      _options?: { signal?: AbortSignal },
+    ) => {
+      if (patrolling) overlapped();
+      return { checked: 1, recorded: true, changed: false };
+    },
+  );
+  refreshDevicePresence.mockRejectedValueOnce(new Error("private-ssh"));
+  const onError = vi.fn();
+  const loop = startMachineCapabilityLoop({
+    store,
+    runtime: { refreshMachine, refreshDevicePresence } as never,
+    onError,
+  });
+  try {
+    await vi.advanceTimersByTimeAsync(100);
+    expect(refreshMachine).toHaveBeenCalledTimes(2);
+    expect(refreshDevicePresence).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(DEVICE_PRESENCE_INTERVAL_MS);
+    expect(refreshDevicePresence.mock.calls).toEqual([
+      ["a", "local", { signal: expect.any(AbortSignal) }],
+      ["b", "local", { signal: expect.any(AbortSignal) }],
+    ]);
+    // One failure is reported without its detail; the other project is still checked.
+    expect(onError.mock.calls).toEqual([
+      [new Error("Device presence check failed")],
+    ]);
+    await vi.advanceTimersByTimeAsync(DEVICE_PRESENCE_INTERVAL_MS);
+    expect(refreshDevicePresence).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(MACHINE_CAPABILITY_INTERVAL_MS);
+    expect(overlapped).not.toHaveBeenCalled();
   } finally {
     await loop.stop();
     store.close();

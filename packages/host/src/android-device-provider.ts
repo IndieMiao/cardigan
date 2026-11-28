@@ -3,6 +3,7 @@ import {
   type DeviceObservation,
   type DeviceSessionContext,
   MAX_DEVICES_PER_PROVIDER,
+  normalizeDeviceInventory,
 } from "@cardigan/domain";
 import type { HostDeviceProvider } from "./device-provider-host.js";
 
@@ -28,6 +29,11 @@ export const ANDROID_DEVICE_TYPE = "android.device";
  * devices, then stops the server. The account's long-lived adb servers, the
  * worker environment's pinned port and devices another server holds are left
  * alone. Prints `{"devices": [...]}`; exits non-zero when no server came up.
+ *
+ * C-841: with one serial as argv (never code) the server is started with
+ * `--one-device <serial>`: it claims only that device, so a presence check
+ * never takes another device (one a Run holds or is about to start its own
+ * server for) and lists only that serial.
  */
 export const ANDROID_DEVICE_PROBE_SCRIPT = `import json,os,socket,subprocess,sys,time
 deadline=time.monotonic()+8.0
@@ -79,7 +85,8 @@ def props(serial):
   return None
  finally:
   c.close()
-server=subprocess.Popen(['adb','-P',str(port),'server','nodaemon'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env)
+one=sys.argv[1:2]
+server=subprocess.Popen(['adb','-P',str(port)]+(['--one-device',one[0]] if one else [])+['server','nodaemon'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=env)
 try:
  listing=None
  while listing is None and left()>3 and server.poll() is None:
@@ -92,7 +99,7 @@ try:
   time.sleep(0.5); listing=devices() or listing
  found=[]
  for r in [l.split() for l in listing.splitlines() if l.strip()][:${MAX_DEVICES_PER_PROVIDER}]:
-  if len(r)<2 or r[0].startswith('emulator-'): continue
+  if len(r)<2 or r[0].startswith('emulator-') or (one and r[0]!=one[0]): continue
   d=dict(serial=r[0],state=r[1])
   info=dict(p.split(':',1) for p in r[2:] if ':' in p)
   if info.get('model'): d['model']=info['model']
@@ -396,6 +403,26 @@ export const androidDeviceProvider: HostDeviceProvider = {
     } catch {
       return undefined;
     }
+  },
+  async presence({ execution, os, probe, signal }, device) {
+    if (
+      device.type !== ANDROID_DEVICE_TYPE ||
+      !DEVICE_ID_PATTERN.test(device.id)
+    )
+      return undefined;
+    const result = await probe(
+      execution,
+      os,
+      [...ANDROID_DEVICE_PROBE_COMMAND, device.id],
+      signal,
+    );
+    const raw = result.ok ? parseAndroidDevices(result.output) : undefined;
+    if (!raw) return undefined;
+    return (
+      normalizeDeviceInventory(ANDROID_DEVICE_TYPE, raw).find(
+        (d) => d.id === device.id,
+      ) ?? "missing"
+    );
   },
   async list({ execution, os, probe, signal }) {
     const result = await probe(

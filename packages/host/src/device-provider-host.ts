@@ -1,4 +1,4 @@
-import type { DeviceProviderPort } from "@cardigan/domain";
+import type { DeviceObservation, DeviceProviderPort } from "@cardigan/domain";
 import type { ExecutionConfig } from "@cardigan/runtime-herdr";
 import type { CapabilityProbe } from "./machine-capability-probe.js";
 
@@ -28,4 +28,14 @@ export interface HostDeviceProvider
     device: { readonly type: string; readonly id: string },
     ports: readonly number[],
   ): Promise<number | undefined>;
+  /**
+   * C-841: whether one known device is there right now, touching only that
+   * device (never one a Run holds, never another server's port). `missing`:
+   * the check ran and did not see it; undefined: no answer (keep what is
+   * known).
+   */
+  presence?(
+    target: HostDeviceTarget,
+    device: { readonly type: string; readonly id: string },
+  ): Promise<DeviceObservation | "missing" | undefined>;
 }

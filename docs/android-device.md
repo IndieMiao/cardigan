@@ -84,7 +84,7 @@ cardigan machine check mac-mini --project sensen
 | `offline` | 连接异常，重插或重启平板 |
 | `unavailable` | 其它情况，例如 Linux 上账号没有 USB 设备权限（udev 规则） |
 
-拔掉后再检查，这台真机从列表里消失，机器也不再有对应能力。已启用、给了本项目的可用真机，才给机器登记能力 `android.device`、`android.device:<序列号>`、`android.device.model.<型号>`。机器每 30 分钟自动检查一次。`cardigan machine show <机器>` 的 `device_leases` 显示哪个 Run 正持有哪台设备。
+拔掉后再检查，这台真机从列表里消失，机器也不再有对应能力。已启用、给了本项目的可用真机，才给机器登记能力 `android.device`、`android.device:<序列号>`、`android.device.model.<型号>`。机器每 30 分钟自动检查一次；两次检查之间，每分钟对已启用、没被 Run 占着的真机做一次在场检查（只起一个 `--one-device <序列号>` 的临时 adb 服务，不碰其它设备和端口），拔线或掉授权后一两分钟内就不再派给新的 Run，`android.any` 改用模拟器（[C-841](plans/C-841.md)）。在场检查要求 adb 支持 `--one-device`（platform-tools 35 起）；不支持时只靠 30 分钟的机器检查。`cardigan machine show <机器>` 的 `device_leases` 显示哪个 Run 正持有哪台设备。
 
 ## 5. 工作项怎么要真机
 
@@ -129,5 +129,5 @@ Run 拿到设备时的环境：
 
 - 工作项一直排队，原因“安卓真机：没有空闲的可用设备”：真机还没在 Needs You 启用或没给这个项目，被别的 Run 占着，被其它项目预约，或者最近一次检查里没有可用的真机。用 `cardigan machine device list` 看启用状态。看 `cardigan machine show <机器>` 的 `device_leases` 和 `health.devices`，授权或重插后重新 `machine check`。
 - 原因“安卓真机：本机 adb_slots 未包含 android.device”：按第 3 节补配置。
-- 已启用的真机拔掉、掉授权或离线时，只有排队中的工作在等它，才会在 Needs You 出现提醒。重新接好或授权后，下一次检查会自动结项。
-- 真机在使用中被拔掉：本次 Run 的 adb 会找不到设备；Run 结束后下一次机器检查把它从列表中去掉。
+- 已启用的真机拔掉、掉授权或离线时，只有排队中的工作在等它，才会在 Needs You 出现提醒（在场检查后一两分钟内出现）。重新接好或授权后，下一次在场检查或机器检查会自动结项。
+- 真机在使用中被拔掉：本次 Run 的 adb 会找不到设备；Run 结束、租约释放后，下一次在场检查把它从列表中去掉。

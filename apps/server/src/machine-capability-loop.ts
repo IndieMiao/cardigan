@@ -1,5 +1,6 @@
 import type { Clock, ProjectId } from "@cardigan/domain";
 import {
+  DEVICE_PRESENCE_INTERVAL_MS,
   DeviceRegistry,
   MACHINE_CAPABILITY_INTERVAL_MS,
   type RuntimeTargets,
@@ -29,7 +30,10 @@ export const DEVICE_INIT_FOLLOWUP_MS = 60 * 1000;
 export function startMachineCapabilityLoop(options: {
   readonly store: Store;
   readonly startup?: LoopStartup | undefined;
-  readonly runtime: Pick<RuntimeTargets, "refreshMachine">;
+  readonly runtime: Pick<RuntimeTargets, "refreshMachine"> &
+    Partial<Pick<RuntimeTargets, "refreshDevicePresence">>;
+  /** C-841: how often enabled, unleased devices are checked between patrols. */
+  readonly devicePresenceIntervalMs?: number;
   readonly verification?: { host: MachineHost; clock: Clock };
   /** C-666: read a remote binding's directory usage after a passing check. */
   readonly usage?: (project: ProjectId, machine: string) => Promise<void>;
@@ -221,11 +225,59 @@ export function startMachineCapabilityLoop(options: {
         }
       }),
   });
+  // C-841: an unplugged or deauthorized device stops being handed out within
+  // a round of this, not at the next patrol. Only enabled devices no lease
+  // holds are asked, one at a time; the patrol keeps everything else.
+  const refreshPresence = options.runtime.refreshDevicePresence?.bind(
+    options.runtime,
+  );
+  const presenceMs =
+    options.devicePresenceIntervalMs ?? DEVICE_PRESENCE_INTERVAL_MS;
+  const presence =
+    refreshPresence &&
+    startTimerLoop({
+      startup: options.startup,
+      signal: controller.signal,
+      name: "device-presence",
+      initialDelayMs: presenceMs,
+      intervalMs: presenceMs,
+      slowTickMs: MACHINE_CAPABILITY_INTERVAL_MS,
+      onError: options.onError,
+      tick: () =>
+        exclusive(async () => {
+          for (const project of options.store.listProjects()) {
+            const machines = options.store.uow.read((tx) =>
+              tx.machines.list(project.id),
+            );
+            for (const { id: machine } of machines) {
+              if (controller.signal.aborted) return;
+              try {
+                await refreshPresence(project.id, machine, {
+                  signal: controller.signal,
+                });
+              } catch {
+                if (controller.signal.aborted) return;
+                options.onError(new Error("Device presence check failed"));
+              }
+            }
+          }
+        }),
+    });
   return {
-    done: Promise.all([loop.done, followup?.done, devices.done]).then(() => {}),
+    done: Promise.all([
+      loop.done,
+      followup?.done,
+      devices.done,
+      presence?.done,
+    ]).then(() => {}),
     stop: async () => {
       controller.abort();
-      await Promise.all([loop.stop(), followup?.stop(), devices.stop()]);
+      await Promise.all([
+        loop.stop(),
+        followup?.stop(),
+        devices.stop(),
+        presence?.stop(),
+      ]);
     },
   };
 }
