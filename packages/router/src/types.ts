@@ -64,6 +64,7 @@ export type NotificationKind =
  */
 export type RuleId =
   | "6.4/card dependencies"
+  | "C-851/dependencies changed"
   | "C-763/card watch"
   | "C-769/review rejection withdrawn"
   | "C-782/early merge conflict"

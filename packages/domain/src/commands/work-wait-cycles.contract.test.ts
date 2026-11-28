@@ -1,10 +1,12 @@
 import { expect, test } from "vitest";
 import type { Event, WorkItem } from "../entities.js";
 import { WaitGraph, waitChain, waitCycles } from "../work-wait-graph.js";
-import type { CommandState } from "./core.js";
+import type { CommandEffect, CommandState } from "./core.js";
 import { createWorkItem, updateWorkItem } from "./pm.js";
 import { validateCardTemplate } from "./templates.js";
 import {
+  actor,
+  apply as applyEffect,
   assignment,
   fixture,
   human,
@@ -84,6 +86,8 @@ function state(items: readonly WorkItem[]): CommandState {
     runs: [],
   };
 }
+const applyAll = (s: CommandState, effect: CommandEffect<unknown>) =>
+  applyEffect(s, effect);
 function apply(s: CommandState, effect: { events: readonly Event[] }) {
   return { ...s, events: [...s.events, ...effect.events] };
 }
@@ -215,6 +219,7 @@ test("patrol reports an existing cycle to PM Ops once, clears it, and reports ag
   for (const item of [w(1), w(2), w(3)]) expect(notice).toContain(item);
   expect(notice).toContain("建议");
   expect(notice).toContain(`把 ${w(2)} 改为非必需`);
+  expect(notice).toContain(`去掉 ${w(2)} 的依赖 ${w(3)}`);
   s = apply(s, first);
   expect(
     value(refreshWorkWaits(s, system, ports())).events.filter(
@@ -361,4 +366,101 @@ test("a template whose required verifier depends on a later producer is refused"
       ),
     ),
   ).toBeUndefined();
+});
+
+function withStanding(s: CommandState, mode: "ops" | "office"): CommandState {
+  return {
+    ...s,
+    assignments: s.assignments.map((a) =>
+      a.scope === "standing" ? { ...a, standing_mode: mode } : a,
+    ),
+  };
+}
+
+test("update_work_item depends_on: PM Ops clears the dependency to break the cycle and the change is recorded", () => {
+  const ops = withStanding(state(deadlock()), "ops");
+  const pmOps = actor(4, "pm");
+  const effect = value(
+    updateWorkItem(ops, pmOps, { work_item_id: w(2), depends_on: [] }, ports()),
+  );
+  const updated = effect.events.find((e) => e.type === "work_item_updated");
+  expect(updated?.payload).toMatchObject({
+    work_item_id: w(2),
+    depends_on: [],
+    previous_depends_on: [w(3)],
+  });
+  expect(effect.timeline.at(-1)?.body).toContain(`依赖：${w(3)} → 无`);
+  const after = applyAll(ops, effect);
+  expect(waitCycles(after.work_items)).toEqual([]);
+  // Adding it back closes the cycle again and is refused with the items named.
+  const refused = updateWorkItem(
+    after,
+    pmOps,
+    { work_item_id: w(2), depends_on: [w(3), w(3)] },
+    ports(),
+  );
+  expect(refused.ok).toBe(false);
+  if (!refused.ok) {
+    expect(refused.error.message).toContain("成环");
+    for (const item of [w(1), w(2), w(3)])
+      expect(refused.error.message).toContain(item);
+  }
+  // A changed dependency closes a cycle too: 1 waiting for 3 while 3 waits for 1.
+  expect(
+    updateWorkItem(
+      state([produce(1), produce(3, { depends_on: [w(1)] })]),
+      human,
+      { work_item_id: w(1), depends_on: [w(3)] },
+      ports(),
+    ).ok,
+  ).toBe(false);
+  // The human may replace dependencies; self, other-card or unknown items are refused.
+  expect(
+    updateWorkItem(
+      state(deadlock()),
+      human,
+      { work_item_id: w(3), depends_on: [] },
+      ports(),
+    ).ok,
+  ).toBe(true);
+  for (const depends_on of [[w(3)], [id("work_item", 999)]])
+    expect(
+      updateWorkItem(
+        state(deadlock()),
+        human,
+        { work_item_id: w(3), depends_on },
+        ports(),
+      ).ok,
+    ).toBe(false);
+});
+
+test("update_work_item depends_on: PM Office and other Agents cannot change dependencies", () => {
+  for (const [s, caller] of [
+    [withStanding(state(deadlock()), "office"), actor(4, "pm")],
+    [state(deadlock()), actor(3, "coder")],
+  ] as const) {
+    const refused = updateWorkItem(
+      s,
+      caller,
+      { work_item_id: w(2), depends_on: [] },
+      ports(),
+    );
+    expect(refused.ok).toBe(false);
+  }
+  const office = updateWorkItem(
+    withStanding(state(deadlock()), "office"),
+    actor(4, "pm"),
+    { work_item_id: w(2), depends_on: [] },
+    ports(),
+  );
+  expect(office.ok || office.error.code).toBe("forbidden_tool");
+  // The refusal is about dependencies only: PM Office still edits other fields.
+  expect(
+    updateWorkItem(
+      withStanding(state(deadlock()), "office"),
+      actor(4, "pm"),
+      { work_item_id: w(2), title: "Tablet smoke" },
+      ports(),
+    ).ok,
+  ).toBe(true);
 });

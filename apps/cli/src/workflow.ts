@@ -107,7 +107,7 @@ import { launchExecution, terminalExecution } from "./runtime-check.js";
 const USAGE = [
   "用法：",
   "  cardigan work-item create <C-n> --title <标题> --role <角色> --kind produce|verify [--required on|off] [--acceptance <标准>] [--target <W-n>] [--requirements <JSON>]",
-  "  cardigan work-item update <W-n> [--requirements <JSON>] [--start-point <完整SHA|分支|none>] | work-item show <W-n>",
+  "  cardigan work-item update <W-n> [--requirements <JSON>] [--start-point <完整SHA|分支|none>] [--depends-on W-1,W-2（none 清空）] | work-item show <W-n>",
   "  cardigan work-item replace-primary <W-旧> --with <W-新> --reason <理由> [--project <p>]",
   "    仅人或常驻 PM Ops：把卡片模板的主产出槽位从派错的旧项转给同卡另一个未取消的产出项。",
   "    旧项的 Assignment 须已释放、Run 已结束；旧项取消，新项成为必需的主产出并可提交完成申请。",
@@ -649,6 +649,22 @@ async function cardUpdate(args: readonly string[], io: CliIo): Promise<number> {
   }
 }
 
+/** C-851: comma-separated same-card work items; `none` clears. */
+function workItemDependsOnFlag(flags: Args["flags"]): WorkItemId[] | undefined {
+  if (flags["depends-on"] === undefined) return undefined;
+  const raw = required(flags, "depends-on");
+  if (raw === "none") return [];
+  return raw.split(",").map((value) => {
+    const parsed = parseId("work_item", value.trim());
+    if (!parsed.ok)
+      throw new CliError(
+        "--depends-on 须为逗号分隔的工作项编号，清空请传 none",
+        EXIT.usage,
+      );
+    return parsed.value.id;
+  });
+}
+
 /** C-728: `none` clears; otherwise a full commit SHA or a branch name. */
 function startPointFlag(
   flags: Args["flags"],
@@ -812,7 +828,7 @@ async function workItemCommand(
           "requirements",
         ]
       : action === "update"
-        ? ["requirements", "start-point"]
+        ? ["requirements", "start-point", "depends-on"]
         : []),
   ];
   if (
@@ -843,8 +859,16 @@ async function workItemCommand(
         : (jsonFlag(flags, "requirements") as WorkItemRequirements);
     if (action === "update") {
       const start = startPointFlag(flags);
-      if (requirements === undefined && start.start_point === undefined)
-        throw new CliError("需要 --requirements 或 --start-point", EXIT.usage);
+      const depends = workItemDependsOnFlag(flags);
+      if (
+        requirements === undefined &&
+        start.start_point === undefined &&
+        depends === undefined
+      )
+        throw new CliError(
+          "需要 --requirements、--start-point 或 --depends-on",
+          EXIT.usage,
+        );
       const item = runCommand(store, {
         operation: "更新工作项",
         target: positionals[0] as string,
@@ -858,6 +882,7 @@ async function workItemCommand(
               work_item_id: parseWorkItem(positionals[0]),
               ...(requirements === undefined ? {} : { requirements }),
               ...start,
+              ...(depends === undefined ? {} : { depends_on: depends }),
             },
             p,
           ),

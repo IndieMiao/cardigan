@@ -64,6 +64,7 @@ import {
   text,
   unwrap,
 } from "./core.js";
+import { isPmOps } from "./delegation.js";
 import { recordFrameworkLinks } from "./framework-dependencies.js";
 import { cancelCardHumanActions } from "./human-action-lifecycle.js";
 import { bindRequiredVerifier } from "./late-verifier.js";
@@ -1088,6 +1089,8 @@ export function updateWorkItem(
     review_limit_decision?: ReviewLimitResolution;
     /** C-728: full commit SHA or branch on a no-merge card; null clears. */
     start_point?: string | null;
+    /** C-851: replace the dependencies; [] clears. Human or PM Ops only. */
+    depends_on?: readonly WorkItemId[];
   },
   ports: CommandPorts,
 ) {
@@ -1174,6 +1177,10 @@ export function updateWorkItem(
         `独立复核超过 ${independentLimit} 轮（项目偏好）只能由人确认放宽`,
       );
     }
+    const depends_on =
+      p.depends_on === undefined
+        ? undefined
+        : workItemDependencies(d, item, p.depends_on);
     const start_point =
       p.start_point === undefined
         ? item.start_point
@@ -1201,6 +1208,7 @@ export function updateWorkItem(
         ? { completion_criteria: p.completion_criteria }
         : {}),
       ...(p.required !== undefined ? { required: p.required } : {}),
+      ...(depends_on !== undefined ? { depends_on } : {}),
       ...(p.manual_assign !== undefined
         ? { manual_assign: p.manual_assign }
         : {}),
@@ -1208,8 +1216,9 @@ export function updateWorkItem(
         ? { max_review_rounds: p.max_review_rounds }
         : {}),
     };
-    // C-851: making a verifier required adds "target waits for it"; refuse a cycle.
-    if (p.required === true && !item.required)
+    // C-851: making a verifier required adds "target waits for it", and new
+    // dependencies add waits of their own; refuse a change that closes a cycle.
+    if ((p.required === true && !item.required) || depends_on !== undefined)
       requireNoWaitCycle(
         d
           .list("work_items")
@@ -1273,6 +1282,12 @@ export function updateWorkItem(
               start_point: start_point ?? null,
               previous_start_point: item.start_point ?? null,
             }),
+        ...(depends_on === undefined
+          ? {}
+          : {
+              depends_on: [...depends_on],
+              previous_depends_on: [...item.depends_on],
+            }),
       },
       {
         type: "status_change",
@@ -1283,6 +1298,11 @@ export function updateWorkItem(
           ...(p.start_point === undefined
             ? []
             : [`起点：${start_point ?? "无"}`]),
+          ...(depends_on === undefined
+            ? []
+            : [
+                `依赖：${item.depends_on.join("、") || "无"} → ${depends_on.join("、") || "无"}`,
+              ]),
         ].join("\n"),
         work_item_id: item.id,
       },
@@ -1316,6 +1336,43 @@ export function updateWorkItem(
     return result;
   });
 }
+/**
+ * C-851: dependencies of an existing item may be replaced or cleared by the
+ * human or PM Ops only — other Agents, PM Office included, keep the order the
+ * card was planned with. Same-card, existing, not itself; order kept, deduped.
+ */
+function workItemDependencies(
+  d: CommandDraft,
+  item: WorkItem,
+  requested: readonly WorkItemId[],
+): readonly WorkItemId[] {
+  ensure(
+    d.actor.kind === "human" || isPmOps(d),
+    "forbidden_tool",
+    "只有人或 PM Ops 可以修改已有工作项的依赖",
+  );
+  ensure(
+    Array.isArray(requested),
+    "validation_failed",
+    "depends_on 须为工作项编号数组，清空请传 []",
+  );
+  ensure(
+    item.status !== "cancelled",
+    "illegal_transition",
+    "已取消的工作项不能修改依赖",
+  );
+  const ids = [...new Set(requested)];
+  for (const id of ids) {
+    ensure(id !== item.id, "validation_failed", `${item.id} 不能依赖自己`);
+    ensure(
+      d.work(id).card_id === item.card_id,
+      "validation_failed",
+      "Dependency must belong to the same card",
+    );
+  }
+  return ids;
+}
+
 export function assign(
   state: CommandState,
   actor: Actor,

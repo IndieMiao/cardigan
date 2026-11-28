@@ -69,7 +69,7 @@ function cycleSuggestions(graph: WaitGraph, cycle: readonly WaitEdge[]) {
     }
     if (edge.via === "dependency")
       out.push(
-        `若 ${edge.from.item} 不该等 ${edge.to.item}，取消 ${edge.from.item} 并按正确依赖重建`,
+        `若 ${edge.from.item} 不该等 ${edge.to.item}，由 PM Ops 用 update_work_item 去掉 ${edge.from.item} 的依赖 ${edge.to.item}`,
       );
   }
   return out.length

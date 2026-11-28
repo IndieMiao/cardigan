@@ -1776,6 +1776,23 @@ function routeAssignment(input: RouteInput, draft: Draft): void {
 function routeWorkItemUpdate(input: RouteInput, draft: Draft): void {
   const item_id = payloadString(input.event.payload, "work_item_id");
   const item = itemOf(input, item_id as WorkItemId | undefined);
+  // C-851: changed dependencies that are now all met let the owner start.
+  if (
+    item !== undefined &&
+    Array.isArray(payloadObject(input.event.payload).depends_on) &&
+    item.kind === "produce" &&
+    item.status === "todo" &&
+    item.assignment_id !== undefined &&
+    canStartWork({ item, work_items: input.snapshot.work_items })
+  )
+    noteAssignment(
+      input,
+      draft,
+      item,
+      "dependency",
+      "C-851/dependencies changed",
+      `${item.id} 的依赖已修改且全部满足，可以开工`,
+    );
   if (item === undefined || !succeeded(item)) {
     return;
   }
