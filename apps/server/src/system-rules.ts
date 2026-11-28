@@ -20,6 +20,7 @@ import {
   refreshHumanActionFollowUps,
   refreshRequiredVerifiers,
   refreshTestReviewLimits,
+  refreshWorkWaits,
   remindSystemWaits,
   resumeWorkWaits,
   retryPreparationAfterDeployment,
@@ -103,12 +104,14 @@ export function runSystemRules(
     authorPrecheckFailureLimit,
     frameworkWaitReminderMs,
     storySummaryHandoffMs,
+    workDependencyStallMs,
   }: {
     mergeGateEnabled?: (project: ProjectId) => boolean;
     baselineConflictMaxResumes?: number;
     authorPrecheckFailureLimit?: number;
     frameworkWaitReminderMs?: number;
     storySummaryHandoffMs?: number;
+    workDependencyStallMs?: number;
   } = {},
 ) {
   rotateIdleDeployedRoles(store, project, loadState);
@@ -276,7 +279,12 @@ export function runSystemRules(
               ),
         ),
     );
-  run([(current, ports) => remindSystemWaits(current, actor, ports)]);
+  run([
+    (current, ports) => remindSystemWaits(current, actor, ports),
+    // C-851: wait cycles and long dependency waits; one notice per cycle/assignment.
+    (current, ports) =>
+      refreshWorkWaits(current, actor, ports, workDependencyStallMs),
+  ]);
 }
 
 /** Git IO stays outside SQLite; the second transaction repeats all eligibility checks. */
