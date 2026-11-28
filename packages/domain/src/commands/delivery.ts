@@ -491,7 +491,8 @@ export function deliverySubmission(
       verified?.[proof] &&
         (system || verified.binding === binding(d, p.subject)),
       "stale_target",
-      "Verification must match this assignment, run and subject",
+      // C-847: a slow verification can outlive the Run that asked for it.
+      "Verification must match this assignment, run and subject: 校验期间本 Run、Assignment 登记或提交已变化（例如已 finish_run 或换了新 Run），请在当前 Run 重新提交 submit_delivery",
     );
     // Check the blocker before superseding anything: invalidating a previous
     // delivery must not clear a decision that should prevent this recovery.

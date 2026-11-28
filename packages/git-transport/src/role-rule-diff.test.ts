@@ -123,3 +123,102 @@ test("the real immutable Git objects assemble a bound body inventory including a
     await f.close();
   }
 });
+
+test("C-847: a content filter keeps every changed path but reads text only where asked, and the role inventory is unchanged", async () => {
+  const { collectRoleRuleInventory } = await import("@cardigan/git-service");
+  const f = await centralFixture();
+  try {
+    await mkdir(join(f.source, "src"));
+    await mkdir(join(f.source, "packages/roles/src"), { recursive: true });
+    await writeFile(join(f.source, "AGENTS.md"), "# Agents\n\nBe careful.\n");
+    await writeFile(join(f.source, "src/a.gd"), "var a = 1\n");
+    await writeFile(join(f.source, "asset.png"), Buffer.from([0, 1, 2, 0]));
+    await git(f.source, "add", ".");
+    await git(f.source, "commit", "-m", "base");
+    const base = await git(f.source, "rev-parse", "HEAD");
+    await writeFile(
+      join(f.source, "AGENTS.md"),
+      "# Agents\n\nBe careful and kind.\n",
+    );
+    await writeFile(join(f.source, "src/a.gd"), "var a = 2\n");
+    await writeFile(join(f.source, "src/b.gd"), "var b = 1\n");
+    await writeFile(join(f.source, "asset.png"), Buffer.from([0, 9, 9, 0]));
+    await writeFile(join(f.source, "packages/roles/src/x.test.ts"), "t\n");
+    await writeFile(join(f.source, "packages/roles/src/new.md"), "role\n");
+    await git(f.source, "add", ".");
+    await git(f.source, "commit", "-m", "changes");
+    const sha = await git(f.source, "rev-parse", "HEAD");
+    const repo = await f.central.ensureCentral(f.project);
+    const full = await f.transport.fileDiffs(repo, base, sha);
+    f.calls.length = 0;
+    const filtered = await f.transport.fileDiffs(repo, base, sha, {
+      content: (path) => path === "AGENTS.md",
+    });
+    expect(
+      filtered.map(
+        ({ path, old_mode, new_mode, old_oid, new_oid, status }) => ({
+          path,
+          old_mode,
+          new_mode,
+          old_oid,
+          new_oid,
+          status,
+        }),
+      ),
+    ).toEqual(
+      full.map(({ path, old_mode, new_mode, old_oid, new_oid, status }) => ({
+        path,
+        old_mode,
+        new_mode,
+        old_oid,
+        new_oid,
+        status,
+      })),
+    );
+    expect(filtered.find((d) => d.path === "AGENTS.md")).toEqual(
+      full.find((d) => d.path === "AGENTS.md"),
+    );
+    for (const d of filtered.filter((d) => d.path !== "AGENTS.md")) {
+      expect(d.patch).toBe("");
+      expect(d).not.toHaveProperty("before");
+      expect(d).not.toHaveProperty("after");
+    }
+    // Content of one path: one patch and its two blobs, nothing per other path.
+    const sub = (name: string) =>
+      f.calls.filter((c) => c.args[c.args.indexOf("-C") + 2] === name).length;
+    expect(sub("diff")).toBe(1);
+    expect(sub("diff-tree")).toBe(1);
+    // Two commit checks (cat-file -t) plus the two blobs of AGENTS.md.
+    expect(sub("cat-file")).toBe(4);
+    // The inventory reads only role paths and classifies exactly as before.
+    const inventory = await collectRoleRuleInventory(
+      f.transport,
+      repo,
+      base,
+      sha,
+    );
+    expect(inventory).toEqual(
+      await collectRoleRuleInventory(
+        {
+          treeOfCommit: (r, s) => f.transport.treeOfCommit(r, s),
+          fileDiffs: (r, b, h) => f.transport.fileDiffs(r, b, h),
+        } as Parameters<typeof collectRoleRuleInventory>[0],
+        repo,
+        base,
+        sha,
+      ),
+    );
+    expect(inventory.changes.map((c) => [c.path, c.category]).sort()).toEqual(
+      [
+        ["AGENTS.md", "unknown"],
+        ["asset.png", "ordinary"],
+        ["packages/roles/src/new.md", "unknown"],
+        ["packages/roles/src/x.test.ts", "ordinary"],
+        ["src/a.gd", "ordinary"],
+        ["src/b.gd", "ordinary"],
+      ].sort(),
+    );
+  } finally {
+    await f.close();
+  }
+});
