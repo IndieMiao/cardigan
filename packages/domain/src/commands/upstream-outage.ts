@@ -2,8 +2,12 @@ import { employeeDisplayName } from "../employee.js";
 import type { Actor } from "../entities.js";
 import type { AssignmentId, RunId } from "../ids.js";
 import {
+  DEFAULT_UPSTREAM_OUTAGE_POLICY,
   openUpstreamOutage,
+  type UpstreamApiError,
   type UpstreamOutageResumeResult,
+  upstreamDisconnectCount,
+  upstreamOutageJoinAllowed,
   upstreamOutages,
 } from "../upstream-outage.js";
 import {
@@ -41,6 +45,11 @@ function who(state: CommandState, id: AssignmentId) {
  * C-821: a quiet Run whose own terminal shows a model API outage error joins
  * its provider's open outage, or starts one. Recording is the whole effect:
  * no notification, no human action, no per-session alert.
+ *
+ * C-842: a Run stopped on a dropped connection (`error: "disconnect"`) joins
+ * the same way. It may join again for a later disconnect once every earlier
+ * stop of it was a disconnect whose outage ended and whose resume was
+ * attempted, at most `disconnect_limit` times in all.
  */
 export function recordUpstreamOutageSession(
   state: CommandState,
@@ -50,11 +59,22 @@ export function recordUpstreamOutageSession(
     assignment_id: AssignmentId;
     run_id: RunId;
     profile?: string | undefined;
+    error?: UpstreamApiError | undefined;
+    disconnect_limit?: number | undefined;
   },
   ports: CommandPorts,
 ) {
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     ensure(PROVIDER.test(p.provider), "validation_failed", "Invalid provider");
+    const limit =
+      p.disconnect_limit ??
+      DEFAULT_UPSTREAM_OUTAGE_POLICY.disconnect_resume_limit;
+    ensure(
+      Number.isSafeInteger(limit) && limit >= 0,
+      "validation_failed",
+      "Invalid disconnect limit",
+    );
+    const disconnect = p.error === "disconnect";
     const a = d.get("assignments", p.assignment_id);
     const run = d.get("runs", p.run_id);
     ensure(
@@ -65,12 +85,17 @@ export function recordUpstreamOutageSession(
       "illegal_transition",
       "Only a running Run of an active Assignment can join an outage",
     );
-    // A Run joins at most one outage: after its one resume the existing
-    // inactivity flow applies, so a repeating error cannot loop resumes.
-    const known = upstreamOutages(state).some((o) =>
-      o.sessions.some((s) => s.run_id === run.id),
-    );
-    if (known) return { outage_id: undefined, started: false };
+    // After the allowed resumes the existing inactivity flow applies.
+    if (
+      !upstreamOutageJoinAllowed(
+        state,
+        run.id,
+        disconnect ? "disconnect" : "outage",
+        limit,
+      )
+    )
+      return { outage_id: undefined, started: false };
+    const count = upstreamDisconnectCount(state, run.id) + 1;
     const open = openUpstreamOutage(state, p.provider);
     const started = !open;
     const outage_id =
@@ -79,10 +104,15 @@ export function recordUpstreamOutageSession(
         provider: p.provider,
         assignment_id: a.id,
         run_id: run.id,
-        body: `模型服务 ${p.provider} 中断：${a.id} 的会话停在模型接口报错上。同一服务后续停住的会话并入这次中断，系统定时探测，恢复后自动发接续消息。`,
+        ...(disconnect ? { cause: "disconnect" } : {}),
+        body: disconnect
+          ? `模型服务 ${p.provider} 连接中断：${a.id} 的会话在回复中途断开，停在空输入框上。系统先探测服务可用，再自动发接续消息；同一服务后续停住的会话并入这一次。`
+          : `模型服务 ${p.provider} 中断：${a.id} 的会话停在模型接口报错上。同一服务后续停住的会话并入这次中断，系统定时探测，恢复后自动发接续消息。`,
       }).id;
     const card = cardOf(d, a.id);
-    const body = `${a.id} 的会话停在模型服务 ${p.provider} 的报错上，已并入上游中断；服务恢复后自动发接续消息。`;
+    const body = disconnect
+      ? `${a.id} 的会话与模型服务 ${p.provider} 的连接在回复中途断开（本轮第 ${count} 次，最多自动接续 ${limit} 次）；确认服务可用后自动发接续消息。`
+      : `${a.id} 的会话停在模型服务 ${p.provider} 的报错上，已并入上游中断；服务恢复后自动发接续消息。`;
     d.emit(
       "upstream_outage_session_added",
       card,
@@ -92,6 +122,7 @@ export function recordUpstreamOutageSession(
         assignment_id: a.id,
         run_id: run.id,
         ...(p.profile ? { profile: p.profile } : {}),
+        ...(disconnect ? { error: "disconnect" } : {}),
         body,
       },
       { type: "system", author: "system", body },
@@ -110,7 +141,13 @@ export function resolveUpstreamOutage(
   return command(state, actor, "manage_host_ops_action", ports, (d) => {
     const o = outage(state, p.outage_id);
     ensure(!o.resolved_at, "illegal_transition", "Outage already resolved");
-    const body = `模型服务 ${o.provider} 已恢复（${p.evidence === "model_probe" ? "探测请求成功" : "同一服务的会话恢复了活动"}），${clock(o.started_at)} 到 ${clock(d.now)} 中断约 ${minutes(o.started_at, d.now)} 分钟；给停住的 ${o.sessions.length} 个会话发接续消息。`;
+    const basis =
+      p.evidence === "model_probe"
+        ? "探测请求成功"
+        : "同一服务的会话恢复了活动";
+    const body = o.sessions.every((s) => s.error === "disconnect")
+      ? `模型服务 ${o.provider} 可用（${basis}）；给连接中断后停住的 ${o.sessions.length} 个会话发接续消息。`
+      : `模型服务 ${o.provider} 已恢复（${basis}），${clock(o.started_at)} 到 ${clock(d.now)} 中断约 ${minutes(o.started_at, d.now)} 分钟；给停住的 ${o.sessions.length} 个会话发接续消息。`;
     d.emit("upstream_outage_resolved", undefined, {
       outage_id: o.id,
       provider: o.provider,
@@ -160,7 +197,9 @@ export function recordUpstreamOutageResume(
     );
     const body =
       p.result === "sent"
-        ? `已给 ${session.assignment_id} 发接续消息：模型服务 ${o.provider} ${clock(o.started_at)} 到 ${clock(o.resolved_at)} 中断，现已恢复，请从中断处继续。`
+        ? session.error === "disconnect"
+          ? `已给 ${session.assignment_id} 发接续消息：与模型服务 ${o.provider} 的连接中断后停住，服务现在可用，请从中断处继续。`
+          : `已给 ${session.assignment_id} 发接续消息：模型服务 ${o.provider} ${clock(o.started_at)} 到 ${clock(o.resolved_at)} 中断，现已恢复，请从中断处继续。`
         : p.result === "skipped"
           ? `${session.assignment_id} 的会话已不停在模型报错上，未发接续消息。`
           : `给 ${session.assignment_id} 的接续消息未确认送达；之后按会话失活流程处理。`;

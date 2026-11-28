@@ -10,6 +10,7 @@ import {
   lastRunActivity,
   type ProjectId,
   type Run,
+  type UpstreamApiError,
   unreceivedBell,
 } from "@cardigan/domain";
 import type { HarnessActivityInspection } from "@cardigan/host";
@@ -257,7 +258,7 @@ export class InactivityAlerts {
     }
     let terminal: TerminalEvidence | undefined;
     let terminalFailed = false;
-    const apiErrors = new Set<Run["id"]>();
+    const apiErrors = new Map<Run["id"], UpstreamApiError>();
     let partial:
       | ReadonlyMap<Assignment["id"], HarnessActivityInspection>
       | undefined;
@@ -335,7 +336,7 @@ export class InactivityAlerts {
           ? Promise.all(
               [...targets.values()].map(({ assignment, run }) =>
                 outage.errorVisible(project, assignment, run).then((shown) => {
-                  if (shown) apiErrors.add(run.id);
+                  if (shown) apiErrors.set(run.id, shown);
                 }),
               ),
             )
@@ -361,7 +362,7 @@ export class InactivityAlerts {
       | undefined,
     check: Check,
     terminal?: TerminalEvidence,
-    apiErrors?: ReadonlySet<Run["id"]>,
+    apiErrors?: ReadonlyMap<Run["id"], UpstreamApiError>,
   ) {
     if (this.closed) return;
     this.options.store.uow.run((currentTx) => {
@@ -396,7 +397,7 @@ export class InactivityAlerts {
           },
           check,
           terminal,
-          apiErrors?.has(run.id),
+          apiErrors?.get(run.id),
         );
       }
     });
@@ -441,7 +442,7 @@ export class InactivityAlerts {
     inspection: HarnessActivityInspection,
     check: Check,
     terminal?: TerminalEvidence,
-    apiError?: boolean,
+    apiError?: UpstreamApiError,
   ) {
     if (
       !this.due(state, a, run, at) ||
@@ -535,8 +536,10 @@ export class InactivityAlerts {
         ? { command: inspection.foreground.command, since }
         : terminal?.foreground;
     // C-821: stopped on a model API error. The provider's outage records it
-    // once and resumes it after recovery; no per-session alert.
-    if (apiError && this.options.outage?.record(tx, state, a, run)) return;
+    // once and resumes it after recovery; no per-session alert. C-842: a
+    // dropped connection the same way, up to the disconnect limit.
+    if (apiError && this.options.outage?.record(tx, state, a, run, apiError))
+      return;
     dispatchAlert(tx, this.options.store, state, at, {
       assignment: a,
       type: "run_inactive",

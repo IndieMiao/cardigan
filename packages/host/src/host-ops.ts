@@ -49,6 +49,7 @@ import {
   recordAutomaticContextRestartResult,
   recordContextUsageNotices,
   requestHostOpsExitConfirmation,
+  resolveUpstreamOutagePolicy,
   retirementStallHandoff,
   reviewRestartStopStarted,
   type SessionActivity,
@@ -137,6 +138,7 @@ import {
   releaseUnresponsiveAgent,
   type UnresponsiveProof,
 } from "./unresponsive-session.js";
+import { upstreamErrorNextStep } from "./upstream-error-hint.js";
 import {
   staleObservation,
   UpstreamHealthMonitor,
@@ -292,8 +294,61 @@ export class HostOpsService {
     inspectWorker: (context, request) =>
       this.workerInspection(context, request),
     read: (context, project) => this.read(context, project),
-    execute: (context, tool, params) => this.execute(context, tool, params),
+    execute: (context, tool, params) =>
+      this.execute(context, tool, params).catch((error: unknown) =>
+        this.refusalWithNextStep(context, tool, params.target_id, error),
+      ),
   };
+  /**
+   * C-842: a refused restart, stop or cancel of a session that is stopped on
+   * a model API error at its empty editor says what happens next instead.
+   * Every other refusal or error is rethrown unchanged.
+   */
+  private async refusalWithNextStep(
+    context: ToolContext,
+    tool: HostOpsToolName,
+    target: string,
+    error: unknown,
+  ): Promise<never> {
+    if (
+      !(error instanceof ToolError) ||
+      error.code !== "illegal_transition" ||
+      ![
+        "host_ops_restart_assignment",
+        "host_ops_stop_assignment",
+        "host_ops_cancel_run",
+      ].includes(tool)
+    )
+      throw error;
+    const project = context.identity.actor.project_id;
+    const found = this.options.store.uow.read((tx) => {
+      const state = loadCommandState(tx, project);
+      const id =
+        tool === "host_ops_cancel_run"
+          ? state.runs.find((r) => r.id === target)?.assignment_id
+          : target;
+      const a = state.assignments.find((x) => x.id === id);
+      return a ? { state, a } : undefined;
+    });
+    const next =
+      found &&
+      (await upstreamErrorNextStep(
+        found.state,
+        found.a,
+        this.options.runtime,
+        this.clock.now(),
+        resolveUpstreamOutagePolicy(this.options.upstream?.upstream_outage),
+      ).catch(() => undefined));
+    if (!next) throw error;
+    throw new ToolError(
+      "illegal_transition",
+      `${error.message}\n${next.text}`,
+      {
+        ...error.details,
+        next_step: next.step,
+      },
+    );
+  }
   /** Private host projection for the authenticated human Workbench. */
   async executionDiagnostics(project: ProjectId) {
     const activity = await this.observeUpstream(project);

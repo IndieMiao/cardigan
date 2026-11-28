@@ -6,9 +6,13 @@ import {
   type UpstreamTarget,
 } from "../upstream-health.js";
 import {
+  resolveUpstreamOutagePolicy,
   runAwaitingUpstreamResume,
   runHeldByUpstreamOutage,
+  upstreamApiError,
   upstreamApiErrorShown,
+  upstreamDisconnectCount,
+  upstreamOutageJoinAllowed,
   upstreamOutageOfRun,
   upstreamOutages,
 } from "../upstream-outage.js";
@@ -95,7 +99,12 @@ function scenario() {
     state = apply(state, result);
     return result as T;
   };
-  const join = (n: number, provider = "relay") =>
+  const join = (
+    n: number,
+    provider = "relay",
+    error?: "outage" | "disconnect",
+    disconnect_limit?: number,
+  ) =>
     run(
       recordUpstreamOutageSession(
         state,
@@ -105,6 +114,8 @@ function scenario() {
           assignment_id: id("assignment", n),
           run_id: id("run", n),
           profile: "claude-opus-high",
+          ...(error ? { error } : {}),
+          ...(disconnect_limit !== undefined ? { disconnect_limit } : {}),
         },
         p(),
       ),
@@ -385,5 +396,200 @@ describe("upstream outage commands (C-821)", () => {
     expect(effect.events.map((e) => e.type)).not.toContain(
       "human_action_requested",
     );
+  });
+});
+
+describe("upstreamApiError (C-842)", () => {
+  test.each([
+    [
+      "claude connection lost",
+      [
+        "● 正在写设计稿。",
+        "⎿  API Error: Connection lost mid-response. The response above may be incomplete.",
+      ],
+    ],
+    [
+      "codex stream disconnected",
+      ["■ stream disconnected before completion: error sending request"],
+    ],
+    [
+      "disconnect after an earlier outage",
+      [
+        "⎿  API Error: 503 No available accounts",
+        "⎿  API Error: Connection lost mid-response",
+      ],
+    ],
+  ])("classifies %s as a disconnect", (_name, lines) => {
+    expect(upstreamApiError(lines)).toBe("disconnect");
+    expect(upstreamApiErrorShown(lines)).toBe(false);
+  });
+  test.each([
+    ["outage", ["⎿  API Error: 503 No available accounts"], "outage"],
+    ["authentication", ["⎿  API Error: 401 Invalid bearer token"], undefined],
+    [
+      "later output",
+      ["⎿  API Error: Connection lost mid-response", "● 继续处理。"],
+      undefined,
+    ],
+    ["prose", ["● 上次 stream disconnected 了，已经恢复。"], undefined],
+  ])("classifies %s", (_name, lines, expected) => {
+    expect(upstreamApiError(lines)).toBe(expected);
+  });
+  test("the policy fills unset values from the defaults", () => {
+    expect(resolveUpstreamOutagePolicy({ disconnect_resume_limit: 3 })).toEqual(
+      {
+        probe_interval_ms: 60_000,
+        remind_after_ms: 30 * 60_000,
+        resume_window_ms: 10 * 60_000,
+        disconnect_resume_limit: 3,
+      },
+    );
+  });
+});
+
+describe("dropped connections join the outage flow (C-842)", () => {
+  const resolveAndResume = (
+    s: ReturnType<typeof scenario>,
+    outage: string,
+    run: number,
+    at: number,
+  ) => {
+    s.now = s.minutes(at);
+    s.run(
+      resolveUpstreamOutage(
+        s.state,
+        s.actor,
+        { outage_id: outage, evidence: "model_probe" },
+        s.p(),
+      ),
+    );
+    s.run(
+      recordUpstreamOutageResume(
+        s.state,
+        s.actor,
+        { outage_id: outage, run_id: id("run", run), result: "sent" },
+        s.p(),
+      ),
+    );
+  };
+
+  test("a disconnect opens its own outage record and gets one resume per stop, up to the limit", () => {
+    const s = scenario();
+    const first = s.join(1, "relay", "disconnect").data.outage_id as string;
+    expect(first).toBeDefined();
+    const [outage] = upstreamOutages(s.state);
+    expect(outage?.cause).toBe("disconnect");
+    expect(outage?.sessions[0]?.error).toBe("disconnect");
+    // Still waiting for its resume: it cannot join again.
+    expect(upstreamOutageJoinAllowed(s.state, id("run", 1), "disconnect")).toBe(
+      false,
+    );
+    s.now = s.minutes(1);
+    expect(s.join(1, "relay", "disconnect").data.outage_id).toBeUndefined();
+    resolveAndResume(s, first, 1, 2);
+    const resolved = s.state.events.findLast(
+      (e) => e.type === "upstream_outage_resolved",
+    );
+    expect(
+      (resolved?.payload as { body?: string } | undefined)?.body,
+    ).toContain("连接中断后停住的 1 个会话");
+    const sent = s.state.timeline.findLast((t) =>
+      t.body.startsWith("已给 A-1 发接续消息"),
+    );
+    expect(sent?.body).toContain("连接中断后停住");
+    // A second disconnect of the same Run joins a new outage record.
+    s.now = s.minutes(20);
+    const second = s.join(1, "relay", "disconnect").data.outage_id as string;
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(upstreamDisconnectCount(s.state, id("run", 1))).toBe(2);
+    expect(
+      s.state.timeline.findLast((t) => t.body.includes("本轮第 2 次"))?.body,
+    ).toContain("最多自动接续 2 次");
+    expect(
+      runAwaitingUpstreamResume(s.state, id("run", 1), s.minutes(21)),
+    ).toBe(true);
+    resolveAndResume(s, second, 1, 22);
+    // The limit (default 2) is used up: no third record, the inactivity flow applies.
+    s.now = s.minutes(40);
+    expect(upstreamOutageJoinAllowed(s.state, id("run", 1), "disconnect")).toBe(
+      false,
+    );
+    expect(s.join(1, "relay", "disconnect").data.outage_id).toBeUndefined();
+    expect(runHeldByUpstreamOutage(s.state, id("run", 1), s.minutes(40))).toBe(
+      false,
+    );
+    expect(
+      s.state.events.filter((e) => e.type === "upstream_outage_session_added"),
+    ).toHaveLength(2);
+    expect(s.state.human_actions).toEqual([]);
+  });
+
+  test("the limit is configurable; zero turns disconnect resumes off", () => {
+    const s = scenario();
+    expect(s.join(1, "relay", "disconnect", 0).data.outage_id).toBeUndefined();
+    const first = s.join(2, "relay", "disconnect", 1).data.outage_id as string;
+    resolveAndResume(s, first, 2, 2);
+    s.now = s.minutes(5);
+    expect(s.join(2, "relay", "disconnect", 1).data.outage_id).toBeUndefined();
+    expect(() =>
+      value(
+        recordUpstreamOutageSession(
+          s.state,
+          s.actor,
+          {
+            provider: "relay",
+            assignment_id: id("assignment", 3),
+            run_id: id("run", 3),
+            error: "disconnect",
+            disconnect_limit: -1,
+          },
+          s.p(),
+        ),
+      ),
+    ).toThrow(/Invalid disconnect limit/);
+  });
+
+  test("an outage stop stays once per Run, also after a disconnect", () => {
+    const s = scenario();
+    const outage = s.join(1).data.outage_id as string;
+    resolveAndResume(s, outage, 1, 2);
+    s.now = s.minutes(20);
+    // C-821 unchanged: a Run that stopped on an outage never joins again.
+    expect(s.join(1).data.outage_id).toBeUndefined();
+    expect(s.join(1, "relay", "disconnect").data.outage_id).toBeUndefined();
+    const t = scenario();
+    const dropped = t.join(1, "relay", "disconnect").data.outage_id as string;
+    resolveAndResume(t, dropped, 1, 2);
+    t.now = t.minutes(20);
+    expect(t.join(1).data.outage_id).toBeDefined();
+    t.now = t.minutes(21);
+    expect(t.join(1, "relay", "disconnect").data.outage_id).toBeUndefined();
+  });
+
+  test("a disconnect during an open outage of its provider joins that outage", () => {
+    const s = scenario();
+    const outage = s.join(1).data.outage_id as string;
+    s.now = s.minutes(1);
+    const joined = s.join(2, "relay", "disconnect");
+    expect(joined.data).toEqual({ outage_id: outage, started: false });
+    const [o] = upstreamOutages(s.state);
+    expect(o?.cause).toBeUndefined();
+    expect(o?.sessions.map((x) => x.error)).toEqual([undefined, "disconnect"]);
+    s.now = s.minutes(3);
+    s.run(
+      resolveUpstreamOutage(
+        s.state,
+        s.actor,
+        { outage_id: outage, evidence: "model_probe" },
+        s.p(),
+      ),
+    );
+    const resolved = s.state.events.findLast(
+      (e) => e.type === "upstream_outage_resolved",
+    );
+    expect(
+      (resolved?.payload as { body?: string } | undefined)?.body,
+    ).toContain("中断约");
   });
 });
