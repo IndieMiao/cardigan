@@ -26,6 +26,7 @@ import {
   createTestRuntime,
 } from "../../../test-support/paths.js";
 import { corePid, stopCore } from "../test-support/hc-core.js";
+import { boundPrompt } from "./bound-prompt.js";
 import { enrollDarwinOwner, stopDarwinOwner } from "./darwin-idle-owner.js";
 import {
   DARWIN_ENROLLMENT_DIR,
@@ -1003,6 +1004,30 @@ test.skipIf(!hcAvailable || !["linux", "darwin"].includes(process.platform))(
       // Back at its own empty prompt: signed, TERM to the direct child only.
       const before = await quiet.record();
       expect(before.foreground.pid).toBe(before.pid);
+      // C-849: hc names the owner, not the CLI, as the foreground. Only a
+      // macOS launch lets the terminal's own program stand for the CLI; its
+      // empty editor still has to be on screen (a running turn is not).
+      const raw = { exec: (args: readonly string[]) => hc(...args) };
+      const shown = (s: typeof quiet, launcher?: boolean) =>
+        boundPrompt(
+          raw,
+          {
+            machine_id: "local",
+            runtime_machine: "local",
+            terminal_ref: s.terminal,
+            agent_name: s.config.agent_name,
+            launch_generation: { run_id: "R-1" as never, generation },
+          },
+          {
+            project_id: "fixture",
+            assignment_id: "A-1",
+            harness: "claude-code",
+          },
+          launcher,
+        );
+      expect(await shown(quiet)).toBe(false);
+      expect(await shown(quiet, true)).toBe("unknown");
+      expect(await shown(running, true)).toBe(false);
       expect(await quiet.stop()).toEqual({
         outcome: "uncertain",
         evidence: { stage: "confirm", reason: "confirmation_pending" },

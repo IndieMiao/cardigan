@@ -12,6 +12,8 @@ interface Terminal {
   status?: { state: string };
   foreground?: { name?: string; pid?: number; argv?: string[] };
   created_ms?: number;
+  pid?: number;
+  keep?: boolean;
 }
 
 /** C-746: lines Claude Code's status line may occupy under the editor. */
@@ -83,10 +85,19 @@ function editor(screen: string, binding: PromptObservation) {
 const errorScreen = (binding: PromptObservation) =>
   !!binding.require_upstream_error || binding.require_disconnect === true;
 
+/**
+ * C-849: on a macOS worker the terminal's own program launches the CLI: the
+ * idle owner (C-602) keeps it as a direct child in the same process group,
+ * and the worker launcher execs it. hc then reports the owner, not the CLI,
+ * as the foreground (C-690). With `launcher`, the terminal's own program in
+ * the foreground of a plain (not kept) terminal stands for the CLI; the empty
+ * editor and the CLI's own idle footer, read twice, still have to show it.
+ */
 export async function boundPrompt(
   raw: Pick<HcClient, "exec">,
   ref: RuntimeRef,
   binding: PromptObservation,
+  launcher = false,
 ) {
   if (
     !/^[a-z0-9_-]{1,32}$/u.test(ref.agent_name) ||
@@ -134,8 +145,14 @@ export async function boundPrompt(
       (program === "claude"
         ? nodeEntry.endsWith("/@anthropic-ai/claude-code/cli.js")
         : nodeEntry.endsWith("/@openai/codex/bin/codex.js"));
+    const launched =
+      launcher &&
+      t.keep === false &&
+      Number.isSafeInteger(t.pid) &&
+      (t.pid ?? 0) > 1 &&
+      t.foreground?.pid === t.pid;
     if (
-      (executable !== program && !packagedCli) ||
+      (executable !== program && !packagedCli && !launched) ||
       !t.foreground?.pid ||
       t.foreground.pid <= 0
     )
@@ -153,7 +170,8 @@ export async function boundPrompt(
       !after ||
       (after.status?.state ?? "unknown") !== state ||
       after.created_ms !== before.created_ms ||
-      after.foreground?.pid !== before.foreground?.pid
+      after.foreground?.pid !== before.foreground?.pid ||
+      after.pid !== before.pid
     )
       return false;
     return state;

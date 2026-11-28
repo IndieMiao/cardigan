@@ -175,3 +175,40 @@ test.each([
     ).toBe(idle);
   },
 );
+
+test("C-849: outside a macOS worker the terminal's own program never stands for the CLI", async () => {
+  const client: HcClient = {
+    available: async () => true,
+    async *lines() {},
+    exec: async (args) => {
+      if (args[0] === "--version") return `hc ${HC_RELEASE.version}`;
+      if (args[0] === "read") return "─────\n❯ \n─────\n  ? for shortcuts";
+      return JSON.stringify({
+        address: ref.terminal_ref,
+        state: "live",
+        status: null,
+        labels: { project: "fixture", assignment: "A-1" },
+        created_ms: 10,
+        pid: 7,
+        keep: false,
+        foreground: { name: "python3", pid: 7 },
+      });
+    },
+  };
+  const runtime = value(
+    await HerdrRuntime.create({
+      client,
+      session: "fixture",
+      execution: { mode: "local", dataDir: "/fixture" },
+    }),
+  );
+  expect(
+    value(
+      await runtime.observe_prompt(ref, {
+        project_id: "fixture",
+        assignment_id: "A-1",
+        harness: "claude-code",
+      }),
+    ),
+  ).toBe(false);
+});

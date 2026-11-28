@@ -630,7 +630,12 @@ export class HerdrRuntime implements Runtime {
   observe_prompt(ref: RuntimeRef, binding: PromptObservation) {
     return result(async () => {
       this.checkRef(ref);
-      return !!(await boundPrompt(this.client, ref, binding));
+      return !!(await boundPrompt(
+        this.client,
+        ref,
+        binding,
+        this.darwinLauncher(ref),
+      ));
     });
   }
   wake(ref: RuntimeRef, doorbell: string, options?: RuntimeWakeOptions) {
@@ -670,6 +675,7 @@ export class HerdrRuntime implements Runtime {
                     raw,
                     ref,
                     options.prompt_binding,
+                    this.darwinLauncher(ref),
                   );
                   if (!state) return false;
                   ifIdle ||= state === "idle";
@@ -1113,7 +1119,20 @@ export class HerdrRuntime implements Runtime {
     ref: RuntimeRef,
     prompt?: TurnIdlePrompt,
   ) {
-    return !!prompt && !!(await boundPrompt(raw, ref, prompt));
+    return (
+      !!prompt &&
+      !!(await boundPrompt(raw, ref, prompt, this.darwinLauncher(ref)))
+    );
+  }
+  /** C-849: a launch on this controller's macOS worker, whose terminal
+   * program (idle owner or worker launcher) holds the CLI's foreground. */
+  private darwinLauncher(ref: RuntimeRef) {
+    return (
+      this.execution.mode === "agent-ssh" &&
+      !!this.execution.macosCore &&
+      ref.runtime_machine !== "local" &&
+      !!ref.launch_generation
+    );
   }
   /** A system-ended turn on this terminal may be stopped: idle or done, or
    * (C-626) no reported activity while the bound CLI shows its empty editor. */
@@ -1339,6 +1358,83 @@ export class HerdrRuntime implements Runtime {
       };
     return confirm(stop);
   }
+  /**
+   * C-849: an idle session on a macOS worker whose idle owner cannot be asked
+   * (launched before enrollment, no owner listening, no key this controller
+   * can rebuild). As the system-ended turn fallback (C-626): the worker first
+   * repeats the owner's own proofs read-only (clean workspace, the enrolled
+   * CLI alive as this labeled terminal's program or its direct child, idle or
+   * its empty editor read twice); only when all pass does it re-prove the
+   * terminal and the receipt's birth identity and send one TERM to that CLI.
+   * Undefined when nothing could be read: the owner's refusal stays as it was.
+   */
+  private async retireDarwinWithoutOwner(
+    ref: RuntimeRef,
+    options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
+    refusal: RetirementEvidence,
+  ): Promise<IdleRetirementResult | undefined> {
+    const execution = this.execution as Extract<
+      ExecutionConfig,
+      { mode: "agent-ssh" }
+    >;
+    const identity: RetirementIdentity = {
+      project_id: options.project_id,
+      assignment_id: options.assignment_id,
+      ...(options.enrolled_process
+        ? { enrolled_process: options.enrolled_process }
+        : {}),
+    };
+    const proof = await explainDarwinRefusal(execution, ref, identity);
+    if (proof === undefined) return;
+    if (proof !== null)
+      return {
+        outcome: "withdrawn",
+        evidence: {
+          ...refusal,
+          ...ownerRefusal(proof).evidence,
+          owner_reason_source: "worker_probe",
+        },
+      };
+    const pid = options.enrolled_process?.pid;
+    const stop: RetirementStop = {
+      path: "darwin_pid",
+      signal: "TERM",
+      ...(pid ? { pid } : {}),
+    };
+    // The worker requires an idle terminal for this stop (require_idle).
+    const sent = await stopDarwinTurn(
+      execution,
+      ref,
+      { ...identity, system_finished_turn: true },
+      options.before_signal,
+    );
+    if (sent.sent === false)
+      return {
+        outcome: "withdrawn",
+        evidence: {
+          ...refusal,
+          stage: "TERM",
+          reason:
+            sent.reason === "guard_changed" ? "guard_changed" : "terminal_busy",
+        },
+      };
+    this.invalidateStatus(ref);
+    const deadline = Date.now() + options.terminate_ms;
+    do {
+      if (
+        (await darwinRetirementObservation(execution, ref, identity)) ===
+        "exited"
+      )
+        return { outcome: "exited", stop };
+      if (Date.now() >= deadline) break;
+      await delay(Math.min(250, deadline - Date.now()));
+    } while (Date.now() <= deadline);
+    // On timeout the next patrol observes only; the stop fence is kept.
+    return {
+      outcome: "uncertain",
+      evidence: { stage: "confirm", reason: "confirmation_pending", stop },
+    };
+  }
   async retire_idle(
     ref: RuntimeRef,
     options: Parameters<NonNullable<Runtime["retire_idle"]>>[1],
@@ -1435,6 +1531,17 @@ export class HerdrRuntime implements Runtime {
                 },
               },
             };
+        }
+        if (
+          stop.outcome === "withdrawn" &&
+          stop.evidence.reason === "conditional_close_unavailable"
+        ) {
+          const fallback = await this.retireDarwinWithoutOwner(
+            ref,
+            options,
+            stop.evidence,
+          );
+          if (fallback) return { ok: true, value: fallback };
         }
         return { ok: true, value: stop };
       }

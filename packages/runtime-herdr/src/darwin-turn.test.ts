@@ -70,6 +70,8 @@ const receipt = {
   start: "1",
 };
 let screen = "";
+/** C-849: per-test changes to the hc terminal record. */
+let terminal: Record<string, unknown> = {};
 async function runtime() {
   return value(
     await HerdrRuntime.create({
@@ -100,6 +102,7 @@ async function runtime() {
               },
               status: { state: "unknown" },
               foreground: { name: "claude", pid: receipt.pid },
+              ...terminal,
             });
           if (args[0] === "read") return screen;
           throw new Error(`unexpected hc call ${args[0]}`);
@@ -132,6 +135,7 @@ const pid = vi.mocked(stopDarwinTurn);
 beforeEach(() => {
   vi.clearAllMocks();
   screen = idle;
+  terminal = {};
   // Strict worker proof cannot confirm (hc has no activity); the opted-in
   // proof can, until the CLI exits after a TERM.
   let exited = false;
@@ -320,9 +324,159 @@ test("C-746 macOS: an owner's anonymous refusal of an idle retirement is explain
     ownerRefusal("worktree_dirty"),
   );
   expect(explain).not.toHaveBeenCalled();
-  // Idle retirement never falls back to a PID signal.
+  // An owner that answered (named or not) is never bypassed by a PID signal.
   expect(pid).not.toHaveBeenCalled();
 });
+
+const idleOptions = (guard = vi.fn(() => true)) => {
+  const {
+    system_finished_turn: _t,
+    idle_prompt: _p,
+    workspace_preflight: _w,
+    ...rest
+  } = options(guard);
+  return rest;
+};
+/** sensen A-657: launched before enrollment, nothing listens (C-804 facts). */
+const unenrolled = {
+  outcome: "withdrawn" as const,
+  evidence: {
+    stage: "probe" as const,
+    reason: "conditional_close_unavailable" as const,
+    precondition: "owner_not_listening",
+    enrollment: "unrecorded",
+    exit_code: 3,
+  },
+};
+
+test("C-849 macOS: an idle session no owner can be asked is proved read-only, then one TERM of the enrolled PID", async () => {
+  const r = await runtime();
+  const explain = vi.mocked(explainDarwinRefusal);
+  owner.mockResolvedValue(unenrolled);
+  explain.mockResolvedValue(null);
+  const guard = vi.fn(() => true);
+  expect(value(await r.retire_idle(ref, idleOptions(guard)))).toEqual({
+    outcome: "exited",
+    stop: { path: "darwin_pid", signal: "TERM", pid: receipt.pid },
+  });
+  expect(explain).toHaveBeenCalledOnce();
+  expect(explain.mock.calls[0]?.[2]).toEqual({
+    project_id: "fixture",
+    assignment_id: "A-1",
+    enrolled_process: receipt,
+  });
+  // The worker requires an idle terminal; no unknown-activity opt-in.
+  expect(pid).toHaveBeenCalledOnce();
+  expect(pid.mock.calls[0]?.[2]).toEqual({
+    project_id: "fixture",
+    assignment_id: "A-1",
+    enrolled_process: receipt,
+    system_finished_turn: true,
+  });
+  expect(guard).toHaveBeenCalledOnce();
+});
+
+test.each([
+  ["dirty", "worktree_dirty"],
+  ["busy", "terminal_not_idle"],
+  ["unread", undefined],
+  ["refused", null],
+  ["guard", null],
+] as const)(
+  "C-849 macOS: an idle session no owner can be asked is kept when %s",
+  async (mode, proof) => {
+    const r = await runtime();
+    owner.mockResolvedValue(unenrolled);
+    vi.mocked(explainDarwinRefusal).mockResolvedValue(proof);
+    if (mode === "refused")
+      pid.mockResolvedValue({ sent: false, reason: "refused" });
+    const guard = vi.fn(() => mode !== "guard");
+    const kept = value(await r.retire_idle(ref, idleOptions(guard)));
+    const expected = {
+      dirty: {
+        ...unenrolled.evidence,
+        ...ownerRefusal("worktree_dirty").evidence,
+        owner_reason_source: "worker_probe",
+      },
+      busy: {
+        ...unenrolled.evidence,
+        ...ownerRefusal("terminal_not_idle").evidence,
+        owner_reason_source: "worker_probe",
+      },
+      // Nothing could be read: the owner's precondition stays as it was.
+      unread: unenrolled.evidence,
+      refused: {
+        ...unenrolled.evidence,
+        stage: "TERM",
+        reason: "terminal_busy",
+      },
+      guard: { ...unenrolled.evidence, stage: "TERM", reason: "guard_changed" },
+    }[mode];
+    expect(kept).toEqual({ outcome: "withdrawn", evidence: expected });
+    if (mode !== "refused" && mode !== "guard")
+      expect(pid).not.toHaveBeenCalled();
+  },
+);
+
+test("C-849 macOS: an idle session TERM not followed by exit keeps the fence for observation", async () => {
+  const r = await runtime();
+  owner.mockResolvedValue(unenrolled);
+  vi.mocked(explainDarwinRefusal).mockResolvedValue(null);
+  observe.mockResolvedValue("unknown");
+  pid.mockResolvedValue({ sent: "unknown" });
+  expect(value(await r.retire_idle(ref, idleOptions()))).toEqual({
+    outcome: "uncertain",
+    evidence: {
+      stage: "confirm",
+      reason: "confirmation_pending",
+      stop: { path: "darwin_pid", signal: "TERM", pid: receipt.pid },
+    },
+  });
+});
+
+test.each([
+  // hc reports the idle owner (the terminal's program), not claude (C-690).
+  [
+    "owner in the foreground",
+    { pid: 4100, foreground: { name: "Python", pid: 4100 }, keep: false },
+    true,
+  ],
+  [
+    "launcher exec'd the CLI",
+    { pid: 4242, foreground: { name: "2.1.0", pid: 4242 }, keep: false },
+    true,
+  ],
+  [
+    "kept terminal",
+    { pid: 4100, foreground: { name: "Python", pid: 4100 }, keep: true },
+    false,
+  ],
+  [
+    "keep not reported",
+    { pid: 4100, foreground: { name: "Python", pid: 4100 } },
+    false,
+  ],
+  [
+    "another process group in the foreground",
+    { pid: 4100, foreground: { name: "vim", pid: 4300 }, keep: false },
+    false,
+  ],
+  [
+    "no terminal pid",
+    { foreground: { name: "Python", pid: 4100 }, keep: false },
+    false,
+  ],
+] as const)(
+  "C-849 macOS: bound empty editor with %s",
+  async (_label, record, shown) => {
+    const r = await runtime();
+    terminal = record;
+    expect(value(await r.observe_prompt(ref, prompt))).toBe(shown);
+    // A turn on screen is never idle, whoever holds the foreground.
+    screen = busy;
+    expect(value(await r.observe_prompt(ref, prompt))).toBe(false);
+  },
+);
 
 test("C-746 macOS: a system-ended turn keeps its bounded PID fallback when the owner names its refusal", async () => {
   const r = await runtime();

@@ -661,8 +661,13 @@ def terminals(home, session, labels, pinned, system, launch=False):
                         processes.extend(rows[p])
                     else:
                         incomplete = True
-            activity = (after.get('status') or {}).get('state')
+            status = after.get('status')
+            activity = status.get('state') if type(status) is dict else None
             row = dict(address=address, state=t['state'], activity=activity if activity in ('working', 'idle', 'done', 'error', 'blocked') else None, screen=tail)
+            if row['activity'] is None and after['state'] == 'live':
+                # C-849: hc relays only OSC 7501; Claude Code and Codex never
+                # send it, so a live CLI has no activity (not a failed read).
+                row['_activity'] = 'activity_not_reported' if activity in (None, 'unknown') else 'activity_unrecognized'
             if launch:
                 # C-806: only a failed launch's own terminal, redacted here.
                 leader = after.get('pid')
@@ -814,6 +819,9 @@ def main(c):
         launch = launch_evidence(c, user.pw_dir, launch_row, launch_why)
     for row in rows or []:
         row.pop('launch', None)
+        code = row.pop('_activity', None)
+        if code and 'activity' not in why:
+            why['activity'] = code
     return dict(terminals=rows, processes=processes,
                 events=events, markers=marks, unavailable=why, helpers=[optional(lambda: digest(p)) if p else None for p in c['helpers']],
                 free_bytes=disk.f_bavail*disk.f_frsize, **({'launch': launch} if launch else {}))
