@@ -16,15 +16,28 @@
 export const ANDROID_ANY = "android.any";
 
 /**
- * Alternative key → its options, in preference order when several are free:
- * the emulator first (closest to what such work used before), the device
- * when every emulator slot is busy.
+ * Alternative key → its options, in preference order when several are free.
+ * C-850: an idle real device first, so the emulator stays free for work that
+ * can only use an emulator (snapshots, cold boots, phone resolutions); the
+ * emulator when no device is idle.
  */
 export const CAPABILITY_ALTERNATIVES: Readonly<
   Record<string, readonly string[]>
 > = Object.freeze({
-  [ANDROID_ANY]: Object.freeze(["android.emulator", "android.device"]),
+  [ANDROID_ANY]: Object.freeze(["android.device", "android.emulator"]),
 });
+
+/** C-850: how an option is named in recorded choices. */
+const OPTION_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  "android.device": "真机",
+  "android.emulator": "模拟器",
+});
+
+export function alternativeOptionLabel(option: string) {
+  return Object.hasOwn(OPTION_LABELS, option)
+    ? (OPTION_LABELS[option] as string)
+    : option;
+}
 
 export function capabilityAlternatives(
   key: string,
@@ -78,29 +91,72 @@ export function unresolvedAlternatives(keys: readonly string[]): string[] {
 export type AlternativeOptionState = "free" | "supported" | "unsupported";
 
 /**
+ * C-850: the option picked for one alternative and why, as recorded on the
+ * Run and its dispatch event: every option's state in preference order.
+ */
+export interface AlternativeChoice {
+  readonly key: string;
+  readonly option: string;
+  readonly states: readonly {
+    readonly option: string;
+    readonly state: AlternativeOptionState;
+  }[];
+  readonly reason: string;
+}
+
+function choiceReason(
+  option: string,
+  states: AlternativeChoice["states"],
+): string {
+  const label = alternativeOptionLabel(option);
+  const picked = states.find((s) => s.option === option)?.state;
+  if (picked === "free") {
+    const before = states.slice(
+      0,
+      states.findIndex((s) => s.option === option),
+    );
+    if (!before.length) return `${label}空闲，优先用${label}`;
+    const why = before
+      .map(
+        (s) =>
+          `${alternativeOptionLabel(s.option)}${s.state === "unsupported" ? "本机不具备" : "没有空闲"}`,
+      )
+      .join("，");
+    return `${why}，用空闲的${label}`;
+  }
+  if (picked === "supported")
+    return `都没有空闲，先排队等${label}，哪个先空出来用哪个`;
+  return `本机都不具备，按首选记为${label}`;
+}
+
+/**
  * Pick one option for every unresolved alternative and add it to the keys:
  * the first free option in preference order, else the first the machine
  * supports (the Run queues for it and is re-resolved on its next admission
  * attempt, so whichever frees up first is taken), else the first option.
  * An alternative already narrowed by one of its options (`android.any` with
  * `android.emulator`) is left alone. Deterministic for the same states, so
- * the keys inspected before a claim match the keys claimed.
+ * the keys inspected before a claim match the keys claimed. `choices` names
+ * each pick with every option's state (C-850).
  */
-export function resolveCapabilityAlternatives(
+export function chooseCapabilityAlternatives(
   keys: readonly string[],
   state: (
     candidate: readonly string[],
     option: string,
   ) => AlternativeOptionState,
-): string[] {
+): { keys: string[]; choices: AlternativeChoice[] } {
   let result = [...keys];
+  const choices: AlternativeChoice[] = [];
   for (const key of unresolvedAlternatives(keys)) {
     const options = capabilityAlternatives(key) ?? [];
     if (options.some((o) => result.includes(o))) continue;
+    const states: { option: string; state: AlternativeOptionState }[] = [];
     let chosen: string | undefined;
     let fallback: string | undefined;
     for (const option of options) {
       const s = state([...result, option], option);
+      states.push({ option, state: s });
       if (s === "free") {
         chosen = option;
         break;
@@ -108,7 +164,25 @@ export function resolveCapabilityAlternatives(
       if (s === "supported" && fallback === undefined) fallback = option;
     }
     const pick = chosen ?? fallback ?? options[0];
-    if (pick !== undefined) result = [...result, pick];
+    if (pick === undefined) continue;
+    result = [...result, pick];
+    choices.push({
+      key,
+      option: pick,
+      states,
+      reason: choiceReason(pick, states),
+    });
   }
-  return result;
+  return { keys: result, choices };
+}
+
+/** `chooseCapabilityAlternatives` without the recorded choices. */
+export function resolveCapabilityAlternatives(
+  keys: readonly string[],
+  state: (
+    candidate: readonly string[],
+    option: string,
+  ) => AlternativeOptionState,
+): string[] {
+  return chooseCapabilityAlternatives(keys, state).keys;
 }

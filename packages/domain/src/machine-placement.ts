@@ -61,6 +61,14 @@ export interface MachinePlacement {
    * an exclusive calendar reservation. Work needing one cannot start here.
    */
   readonly reserved?: readonly string[];
+  /**
+   * C-850: per device type this machine knows (`android.device`), how many of
+   * its devices a new Run of this project could take now: listed by the
+   * current check, enabled for the project, not held, not reserved by another
+   * project, less the claims of owners still waiting to start. Ranks
+   * `android.any` toward a machine with an idle device.
+   */
+  readonly idle_devices?: Readonly<Record<string, number>>;
   readonly limit: number;
   /** Portion of occupied from assigned work not already holding a physical slot. */
   readonly pending_assignments?: number;

@@ -14,7 +14,7 @@
 
 ## 多选一的要求（`android.any`）
 
-“安卓设备任一”是一个多选一的能力（domain `CAPABILITY_ALTERNATIVES`）：选项是 `android.emulator` 和 `android.device`。机器检查在任一选项验证通过后登记它；派发前和领取时（同样的输入得到同样的结果）按顺序选第一个空闲的选项，没有空闲的就等机器具备的第一个，下一次派发再重新选。Run 同时占 `android.any` 和选中的选项，名额、adb 槽位和设备租约都按选项处理。新增一种设备提供方时，如果它也能替代某类设备，把它加进对应多选一的选项即可。见 [C-815 计划](plans/C-815.md)。
+“安卓设备任一”是一个多选一的能力（domain `CAPABILITY_ALTERNATIVES`）：选项是 `android.emulator` 和 `android.device`。机器检查在任一选项验证通过后登记它；派发前和领取时（同样的输入得到同样的结果）按顺序（`android.any` 先真机、后模拟器，C-850）选第一个空闲的选项，没有空闲的就等机器具备的第一个，下一次派发再重新选；选择和各选项状态记在 Run 的 `resource_choices` 和 `run_dispatched` 事件里。选机时有空闲首选项的机器优先（机器检查给出每类设备的空闲台数 `idle_devices`）。Run 同时占 `android.any` 和选中的选项，名额、adb 槽位和设备租约都按选项处理。新增一种设备提供方时，如果它也能替代某类设备，把它加进对应多选一的选项即可。见 [C-815 计划](plans/C-815.md)。
 
 ## 新增一个提供方要做的
 

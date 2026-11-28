@@ -747,6 +747,11 @@ export interface Run {
   readonly resource_keys?: readonly string[];
   /** C-736: why admission claimed `resource_keys` or skipped the work item's. */
   readonly resource_reason?: string;
+  /**
+   * C-850: which option admission picked for each alternative among the
+   * work item's keys (`android.any` → a device or the emulator) and why.
+   */
+  readonly resource_choices?: readonly import("./capability-alternatives.js").AlternativeChoice[];
   /** Q-744: fixed on the first independent queue, inherited without reset. */
   readonly recovery_policy?: {
     readonly version: 6;

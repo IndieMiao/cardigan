@@ -8,6 +8,7 @@ import {
   isDeviceKey,
   type Run,
   runOccupiesSlot,
+  usableDevice,
 } from "@cardigan/domain";
 import {
   type ReadRepositories,
@@ -85,6 +86,32 @@ export function heldDevices(store: Store, machine: string, type: string) {
         .all(machine, type) as { device: string }[]
     ).map((r) => r.device),
   );
+}
+
+/**
+ * C-850: how many listed devices of a type on this machine a new Run of this
+ * project could take now: usable, enabled for the project (C-817), held by
+ * no live lease and not among `reserved` (resources another project holds by
+ * reservation). The same filter `DeviceLeases` applies when it picks one.
+ */
+export function idleDevices(
+  store: Store,
+  project: string,
+  machine: string,
+  type: string,
+  devices: readonly DeviceObservation[],
+  reserved: ReadonlySet<string>,
+) {
+  const taken = heldDevices(store, machine, type);
+  const registry = new DeviceRegistry(store);
+  return devices.filter(
+    (d) =>
+      d.type === type &&
+      usableDevice(d) &&
+      !taken.has(d.id) &&
+      deviceEnabledFor(registry.get(machine, d.type, d.id), project) &&
+      !reserved.has(deviceResourceName(d.type, d.id)),
+  ).length;
 }
 
 export class DeviceLeases {

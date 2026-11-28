@@ -73,6 +73,7 @@ import {
   boundedRetirementError,
   CAPACITY_WAIT_REASON,
   capacityWaiterRunnable,
+  chooseResourceAlternatives,
   crossRepairSendBoundary,
   deferIfTargetWait,
   deferTargetAttempt,
@@ -100,7 +101,6 @@ import {
   recordRetainedWriterRefusal,
   recordRetirementDispatch,
   redactFailureLine,
-  resolveResourceAlternatives,
   retainedWriterRefusal,
   runCapacitySnapshot,
   runResourceClaim,
@@ -2287,10 +2287,13 @@ export class Dispatcher {
       ready,
       state.timeline,
     );
-    return {
-      ...claim,
-      keys: this.resolveKeys(tx, state.project_id, a, claim.keys),
-    };
+    const { keys, choices } = this.chooseKeys(
+      tx,
+      state.project_id,
+      a,
+      claim.keys,
+    );
+    return { ...claim, keys, choices };
   }
   /** C-815: `android.any` becomes the emulator or device free right now. */
   private resolveKeys(
@@ -2299,7 +2302,16 @@ export class Dispatcher {
     a: Assignment,
     keys: readonly string[],
   ) {
-    return resolveResourceAlternatives(
+    return this.chooseKeys(tx, project, a, keys).keys;
+  }
+  /** C-850: `resolveKeys` with each pick and its reason, for the claimed Run. */
+  private chooseKeys(
+    tx: ReadRepositories,
+    project: string,
+    a: Assignment,
+    keys: readonly string[],
+  ) {
+    return chooseResourceAlternatives(
       this.options.store,
       project,
       a,
@@ -2748,10 +2760,12 @@ export class Dispatcher {
           ...run,
           resource_keys: keys,
           ...(claim.reason ? { resource_reason: claim.reason } : {}),
+          ...(claim.choices.length ? { resource_choices: claim.choices } : {}),
           ...(probe ? { provider_probe: probe } : {}),
         };
         delete cleared.queue_reason;
         if (!claim.reason) delete cleared.resource_reason;
+        if (!claim.choices.length) delete cleared.resource_choices;
         run = cleared;
         tx.runs.put(project, run);
         state = this.loadState(tx, project);

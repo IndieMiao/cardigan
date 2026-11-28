@@ -26,7 +26,12 @@ import {
   runCapacitySnapshot,
 } from "@cardigan/host";
 import { parseLaunchConfig } from "@cardigan/roles";
-import { PROJECT_EVENT_STREAM, unfinishedBellAttempts } from "@cardigan/store";
+import {
+  beginMachineObservation,
+  completeMachineObservation,
+  PROJECT_EVENT_STREAM,
+  unfinishedBellAttempts,
+} from "@cardigan/store";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { dispatchFixture } from "../test-support/dispatch.js";
 import { Dispatcher, type DispatcherOptions } from "./dispatch.js";
@@ -564,6 +569,25 @@ test.each(["android.emulator", "android.any"])(
   "C-834 consecutive %s Runs of one Assignment reuse no session and each launch with their own slot's adb port and serial",
   async (capability) => {
     const { cfg, leases } = await adbSlotLeases({ "android.emulator": 2 });
+    // C-850: the machine verified an emulator and no device, so android.any
+    // (which prefers an idle device) resolves to the emulator.
+    const system = { kind: "system" as const, project_id: f.project };
+    const now = f.clock.now();
+    beginMachineObservation(f.store, system, f.project, "local", "obs-1", now);
+    completeMachineObservation(
+      f.store,
+      system,
+      f.project,
+      "local",
+      "obs-1",
+      { status: "passed", checked_at: now, blockers: [], launch_enabled: true },
+      ["android.emulator", "android.any"].map((key) => ({
+        key,
+        version: null,
+        verified_at: now,
+        evidence_ref: `machine-observation:obs-1#${key}`,
+      })),
+    );
     const owner = f.create();
     f.apply((s, a, p) =>
       updateWorkItem(
@@ -671,6 +695,30 @@ test.each(["android.emulator", "android.any"])(
     });
     for (const env of [first, second])
       expect(env.ADB_SERVER_SOCKET).toBeUndefined();
+    // C-850: each android.any Run records its pick and why.
+    const runs = f
+      .state()
+      .runs.filter(
+        (r) =>
+          r.assignment_id === owner.assignment.id && r.resource_keys?.length,
+      );
+    expect(runs).toHaveLength(2);
+    for (const r of runs)
+      expect(r.resource_choices).toEqual(
+        capability === "android.any"
+          ? [
+              {
+                key: "android.any",
+                option: "android.emulator",
+                states: [
+                  { option: "android.device", state: "unsupported" },
+                  { option: "android.emulator", state: "free" },
+                ],
+                reason: "真机本机不具备，用空闲的模拟器",
+              },
+            ]
+          : undefined,
+      );
   },
 );
 

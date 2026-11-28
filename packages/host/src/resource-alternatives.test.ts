@@ -23,7 +23,10 @@ import {
 import type { AdbProbe } from "./adb-slot-probe.js";
 import { DeviceRegistry } from "./device-registry.js";
 import { launchDevices } from "./launch.js";
-import { resolveResourceAlternatives } from "./resource-alternatives.js";
+import {
+  chooseResourceAlternatives,
+  resolveResourceAlternatives,
+} from "./resource-alternatives.js";
 import { MachineLeases } from "./resource-leases.js";
 import type { ResourceProbe } from "./resource-probe.js";
 import {
@@ -220,56 +223,108 @@ async function end(l: MachineLeases, r: Run, ms: number) {
   l.devices.reconcile("first", () => later(ms));
 }
 
-test("android.any takes the free emulator, then the free tablet, queues while both are busy, and takes whichever is released first", async () => {
+test("android.any takes the free tablet and leaves the emulator free, then the emulator, queues while both are busy, and takes whichever is released first", async () => {
   const cfg = await config(1);
   const l = leases(cfg);
   observe(BOTH, [TABLET]);
+  // C-850: both free: the tablet, exclusively; the emulator stays free.
   const first = await admit(cfg, l, 1, ["android.any"]);
-  expect(first.keys).toEqual(["android.any", "android.emulator"]);
-  expect(env(l, first.run)).toEqual({
-    adb_slot: {
-      generation: expect.any(String),
-      slot: 0,
-      adb_port: 15100,
-      emulator_port: 5600,
-      usb_off: true,
-    },
-  });
-  // The only emulator slot is taken: the next one gets the tablet, exclusively.
-  const second = await admit(cfg, l, 2, ["android.any"]);
-  expect(second.keys).toEqual(["android.any", TYPE]);
-  expect(second.access?.devices).toEqual([TABLET]);
-  expect(env(l, second.run).device_session?.env).toEqual({
+  expect(first.keys).toEqual(["android.any", TYPE]);
+  expect(first.access?.devices).toEqual([TABLET]);
+  expect(env(l, first.run).device_session?.env).toEqual({
     ANDROID_SERIAL: TABLET.id,
     CARDIGAN_DEVICE_SERIAL: TABLET.id,
   });
-  expect(JSON.stringify(env(l, first.run))).not.toContain(TABLET.id);
-  // Both busy: it queues (for the emulator, the first the machine has).
+  // The tablet is taken: the next one gets the emulator without waiting.
+  const second = await admit(cfg, l, 2, ["android.any"]);
+  expect(second.queued).toBeUndefined();
+  expect(second.keys).toEqual(["android.any", "android.emulator"]);
+  expect(second.access?.adb?.emulator_port).toBeTypeOf("number");
+  expect(JSON.stringify(env(l, second.run))).not.toContain(TABLET.id);
+  // Both busy: it queues (for the tablet, the first the machine has).
   const third = await admit(cfg, l, 3, ["android.any"]);
   expect(third.queued).toBeDefined();
-  expect(third.keys).toEqual(["android.any", "android.emulator"]);
-  // The tablet comes back first: the waiting Run now takes it.
+  expect(third.keys).toEqual(["android.any", TYPE]);
+  // The emulator comes back first: the waiting Run now takes it.
   await end(l, second.run, 1000);
-  expect(l.devices.diagnostics("local")).toEqual([]);
   const retried = await admit(cfg, l, 3, ["android.any"]);
-  expect(retried.keys).toEqual(["android.any", TYPE]);
-  expect(retried.access?.devices?.map((d) => d.id)).toEqual([TABLET.id]);
-  // Then the emulator: the next waiting Run gets it.
+  expect(retried.keys).toEqual(["android.any", "android.emulator"]);
+  expect(retried.access?.adb?.emulator_port).toBeTypeOf("number");
+  // Then the tablet: the next waiting Run gets it.
   expect((await admit(cfg, l, 4, ["android.any"])).queued).toBeDefined();
   await end(l, first.run, 2000);
+  expect(l.devices.diagnostics("local")).toEqual([]);
   const fourth = await admit(cfg, l, 4, ["android.any"]);
-  expect(fourth.keys).toEqual(["android.any", "android.emulator"]);
-  expect(fourth.access?.adb).toMatchObject({ emulator_port: 5600 });
+  expect(fourth.keys).toEqual(["android.any", TYPE]);
+  expect(fourth.access?.devices?.map((d) => d.id)).toEqual([TABLET.id]);
   expect(
     store
       .getUpdates({ project_id: "first" })
       .events.filter((e) => e.type.startsWith("machine_device_"))
       .map((e) => [e.type, (e.payload as { run_id: string }).run_id]),
   ).toEqual([
-    ["machine_device_acquired", second.run.id],
-    ["machine_device_released", second.run.id],
-    ["machine_device_acquired", retried.run.id],
+    ["machine_device_acquired", first.run.id],
+    ["machine_device_released", first.run.id],
+    ["machine_device_acquired", fourth.run.id],
   ]);
+});
+
+test("the pick comes with every option's state and a reason (C-850)", async () => {
+  const cfg = await config(1);
+  const l = leases(cfg);
+  observe(BOTH, [TABLET]);
+  const { owner } = needs(1, ["android.any"]);
+  const choose = () =>
+    store.uow.read((tx) =>
+      chooseResourceAlternatives(
+        store,
+        "first",
+        owner,
+        assignmentResourceKeys(tx, "first", owner),
+        at,
+        () => runCapacitySnapshot(store, tx, (m) => cfg.resourcesForMachine(m)),
+        l,
+      ),
+    );
+  expect(choose()).toEqual({
+    keys: ["android.any", TYPE],
+    choices: [
+      {
+        key: "android.any",
+        option: TYPE,
+        states: [{ option: TYPE, state: "free" }],
+        reason: "真机空闲，优先用真机",
+      },
+    ],
+  });
+  // The tablet held by another Run: the emulator, with why.
+  const holder = await admit(cfg, l, 2, [TYPE]);
+  expect(holder.access?.devices?.map((d) => d.id)).toEqual([TABLET.id]);
+  expect(choose().choices).toEqual([
+    {
+      key: "android.any",
+      option: "android.emulator",
+      states: [
+        { option: TYPE, state: "supported" },
+        { option: "android.emulator", state: "free" },
+      ],
+      reason: "真机没有空闲，用空闲的模拟器",
+    },
+  ]);
+  // Nothing to choose for a concrete kind.
+  expect(
+    store.uow.read((tx) =>
+      chooseResourceAlternatives(
+        store,
+        "first",
+        owner,
+        ["android.emulator"],
+        at,
+        () => runCapacitySnapshot(store, tx, (m) => cfg.resourcesForMachine(m)),
+        l,
+      ),
+    ),
+  ).toEqual({ keys: ["android.emulator"], choices: [] });
 });
 
 test("android.any on a machine with only an emulator, or only a tablet, uses what is there", async () => {
@@ -346,8 +401,9 @@ test("an android.any Assignment may need an adb slot and a fresh session per Run
 /**
  * C-825: an earlier `android.any` waiter both of whose options are held
  * (the emulator reserved by another project, the tablet in use) waits
- * elsewhere: it must not hold a later Run back. The emulator has no slot
- * limit, so only the resolved keys show that it is blocked.
+ * elsewhere: it must not hold a later Run back. Neither option's slot count
+ * is full, so only the resolved keys show that it is blocked (C-850: it
+ * resolves to the tablet, the preferred option, held by another Run).
  */
 test("an earlier android.any waiter held on both options does not hold a later Run, judged by its resolved keys as the dispatcher does", async () => {
   const capacity = async (resources: Record<string, number>) => {
@@ -384,7 +440,8 @@ test("an earlier android.any waiter held on both options does not hold a later R
     later(3_600_000),
     () => at,
   );
-  const cfg = await capacity({ [TYPE]: 1 });
+  // Room for two devices but only one tablet: the slot count does not show it.
+  const cfg = await capacity({ [TYPE]: 2 });
   const l = leases(cfg);
   observe(BOTH, [TABLET]);
   const holder = await admit(cfg, l, 1, [TYPE]);
@@ -466,7 +523,7 @@ test("an earlier android.any waiter held on both options does not hold a later R
         l,
       ),
     ),
-  ).toEqual(["android.any", "android.emulator"]);
+  ).toEqual(["android.any", TYPE]);
   expect(holdsLater(unresolved)).toBe(true);
   expect(holdsLater(shared)).toBe(false);
 

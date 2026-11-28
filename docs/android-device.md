@@ -107,7 +107,8 @@ Run 拿到设备时的环境：
 不在乎模拟器还是真机的工作（tester、实测和取证类工作项默认如此）写 `android.any`：
 
 - 机器上验证过模拟器（`android.emulator`）或有可用真机（`android.device`）就具备 `android.any`。
-- 派发时哪个空闲用哪个：都空闲时先用模拟器，模拟器名额占满时用真机；两类都忙时排队，哪个先空出来用哪个。独占、释放、名额、预约都和直接要求那一类相同，Run 的 `resource_keys` 记 `android.any` 加实际分到的那一类。
+- 派发时哪个空闲用哪个：都空闲时先用真机，把模拟器留给只能用模拟器的工作；没有空闲真机时用模拟器，不为等真机排队；两类都忙时排队，哪个先空出来用哪个（[C-850](plans/C-850.md)）。独占、释放、名额、预约都和直接要求那一类相同，Run 的 `resource_keys` 记 `android.any` 加实际分到的那一类，`resource_choices` 和 `run_dispatched` 事件记选了哪类、为什么。
+- 选机时（工作项指派到机器），有空闲真机的机器优先，其次有空闲模拟器的；机器上限、项目额度、名额和其它项目的预约仍排在前面。`machine_selected` 事件的候选里 `free_option` 记每台机器能马上给的那类，`alternative` 记最终选择和理由。
 - 分到哪一类看 `ANDROID_SERIAL`：`emulator-` 开头是模拟器，否则是真机（也在 `CARDIGAN_DEVICE_SERIAL`）。环境与上表“只有模拟器”“只有真机”相同。
 - 只有明确需要模拟器（快照、冷启动、指定手机分辨率）才写 `android.emulator`，明确需要真机才写 `android.device`；写了具体类型的工作项不受 `android.any` 影响。
 - `run-capacity.yaml` 不用为 `android.any` 单独配名额（也可以配，作为两类合计的上限）；`adb_slots.resources` 照常列 `android.emulator`、`android.device`。

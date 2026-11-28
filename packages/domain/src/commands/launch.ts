@@ -861,6 +861,18 @@ export function dispatchRun(
     d.emit("run_dispatched", cardId(d, assignment), {
       run_id: run.id,
       assignment_id: assignment.id,
+      // C-850: the device-or-emulator pick, so it can be checked afterwards.
+      ...(run.resource_choices?.length
+        ? {
+            resource_keys: [...(run.resource_keys ?? [])],
+            resource_choices: run.resource_choices.map((c) => ({
+              key: c.key,
+              option: c.option,
+              states: c.states.map((s) => ({ ...s })),
+              reason: c.reason,
+            })),
+          }
+        : {}),
     });
     return next;
   });

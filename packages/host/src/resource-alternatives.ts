@@ -1,8 +1,9 @@
 import {
+  type AlternativeChoice,
   type Assignment,
+  chooseCapabilityAlternatives,
   type MachineResources,
   remainingResourceRatio,
-  resolveCapabilityAlternatives,
   unresolvedAlternatives,
 } from "@cardigan/domain";
 import {
@@ -36,6 +37,16 @@ export interface AlternativeCapacity {
  * alternative are returned unchanged and nothing is read.
  */
 export function resolveResourceAlternatives(
+  ...args: Parameters<typeof chooseResourceAlternatives>
+): string[] {
+  return chooseResourceAlternatives(...args).keys;
+}
+
+/**
+ * `resolveResourceAlternatives` with each pick and every option's state
+ * (C-850), for the claimed Run and its dispatch event.
+ */
+export function chooseResourceAlternatives(
   store: Store,
   project: string,
   owner: Assignment,
@@ -43,8 +54,9 @@ export function resolveResourceAlternatives(
   now: string,
   capacity: () => AlternativeCapacity,
   leases?: MachineLeases,
-): string[] {
-  if (!unresolvedAlternatives(keys).length) return [...keys];
+): { keys: string[]; choices: AlternativeChoice[] } {
+  if (!unresolvedAlternatives(keys).length)
+    return { keys: [...keys], choices: [] };
   const machine = owner.machine_id;
   const verified = new Set(
     readMachineObservationsInTransaction(store, project, machine, now)
@@ -53,7 +65,7 @@ export function resolveResourceAlternatives(
   );
   const snapshot = capacity();
   const slots = snapshot.resourcesForMachine(machine);
-  return resolveCapabilityAlternatives(keys, (candidate, option) => {
+  return chooseCapabilityAlternatives(keys, (candidate, option) => {
     if (!verified.has(option)) return "unsupported";
     const expanded = withDeviceResources(candidate);
     return remainingResourceRatio(expanded, slots) > 0 &&
