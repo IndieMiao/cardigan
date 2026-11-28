@@ -131,6 +131,33 @@ function backend(runs: (WorkerWizardStep["step"] | "passed")[]) {
       return { wizard };
     }),
     workerWizard: vi.fn(async () => get()),
+    // C-846: a registered machine's written draft, from its detail page.
+    machineRemoteLaunch: vi.fn(async () => ({
+      remote_launch: "available" as const,
+    })),
+    startMachineWorkerWizard: vi.fn(async (_p: string, machine: string) => {
+      polls = 0;
+      wizard = {
+        id: "6f1c2a7e-0000-4000-8000-000000000002",
+        machine_id: machine,
+        project_id: "p-1",
+        label: "构建机",
+        os: "linux",
+        arch: "x64",
+        phase: "running",
+        check_id: `check-${++checks}`,
+        steps: STEPS.map((step) => ({ step, state: "pending", elapsed_ms: 0 })),
+        commands: {
+          account: "sudo groupadd --gid 1501 cg_cardigan",
+          directories: "sudo /usr/bin/python3 install-linux-worker.py --check",
+          tools: "sudo /usr/bin/python3 -I - <<'PY'",
+          helpers: "sudo install -o root worker-files.py",
+        },
+        command_guide: "docs/steamos-worker.md",
+        command_prerequisites: "仅在目标机管理员终端执行。",
+      };
+      return { wizard };
+    }),
     workerWizardAction: vi.fn(
       async (_p: string, _id: string, action: WorkerWizardAction) => {
         if (!wizard) throw new ApiError(404, "not_found", "没有此向导会话");
@@ -427,7 +454,7 @@ test("commands copy for manual runs; a session gone from the server starts over"
     await screen.findByRole("button", { name: "继续添加 worker" }),
   );
   const fresh = within(await screen.findByRole("dialog"));
-  await fresh.findByText("向导已失效（服务重启或超过 24 小时），请重新填写。");
+  await fresh.findByText("向导已失效（已放弃或超过 24 小时），请重新填写。");
   expect(fresh.getByRole("button", { name: "预览配置" })).toBeTruthy();
   expect(window.localStorage.length).toBe(0);
 });
@@ -1690,4 +1717,57 @@ test("C-707: a hand-filled wizard's report names what was not collected", async 
   expect(
     dialog.getByRole("list", { name: "添加 worker 的步骤" }).textContent,
   ).toContain("填写");
+});
+
+test("C-846: an onboarded machine's detail page enables remote launch: checks, then the separate launch preview", async () => {
+  const fake = backend(["passed"]);
+  page(fake.client);
+  await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(screen.getByRole("button", { name: "构建机 详情" }));
+  const detail = within(await screen.findByRole("dialog"));
+  fireEvent.click(await detail.findByRole("button", { name: "开启远程派发" }));
+  expect(fake.client.startMachineWorkerWizard).toHaveBeenCalledWith(
+    "p-1",
+    "builder",
+  );
+  // The wizard continues the session; nothing is enabled before the preview.
+  const dialog = within(
+    await screen.findByRole("dialog", { name: /添加 worker/ }),
+  );
+  expect(storedWizard("p-1")).toBe("6f1c2a7e-0000-4000-8000-000000000002");
+  await waitFor(() => expect(header()).toEqual(["复查", "完成", "关闭抽屉"]));
+  fireEvent.click(dialog.getByRole("button", { name: "预览开启" }));
+  await dialog.findByRole("table", { name: "派发配置差异" });
+  fireEvent.click(dialog.getByRole("checkbox", { name: "我确认开启远程派发" }));
+  fireEvent.click(dialog.getByRole("button", { name: "开启远程派发" }));
+  await dialog.findByText("已开启远程派发");
+  expect(fake.writes).toEqual(["launch-preview", "enable"]);
+});
+
+test("C-846: the detail page offers it only when the host says so, and explains a refusal", async () => {
+  const fake = backend([]);
+  const unavailable = vi.fn(async () => ({
+    remote_launch: "enabled" as const,
+  }));
+  page({ ...fake.client, machineRemoteLaunch: unavailable });
+  await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(screen.getByRole("button", { name: "构建机 详情" }));
+  let detail = within(await screen.findByRole("dialog"));
+  await detail.findByText("概况");
+  await waitFor(() => expect(unavailable).toHaveBeenCalled());
+  expect(detail.queryByRole("button", { name: "开启远程派发" })).toBeNull();
+  cleanup();
+  const refused = vi.fn(async () => {
+    throw new ApiError(404, "worker_draft_missing", "没有草稿");
+  });
+  page({ ...fake.client, startMachineWorkerWizard: refused });
+  await screen.findByRole("table", { name: "机器列表" });
+  fireEvent.click(screen.getByRole("button", { name: "构建机 详情" }));
+  detail = within(await screen.findByRole("dialog"));
+  fireEvent.click(await detail.findByRole("button", { name: "开启远程派发" }));
+  await screen.findByText(
+    "这台机器没有向导写入的接入配置，请用“添加 worker”接入。",
+  );
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(storedWizard("p-1")).toBeUndefined();
 });

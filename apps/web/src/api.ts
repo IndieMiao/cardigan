@@ -1745,7 +1745,7 @@ export interface WorkerPairingDevice {
   }[];
   readonly gpu?: string;
 }
-/** A server-side wizard session; it lives 24 hours in the Web process. */
+/** A server-side wizard session; it lives 24 hours, also across restarts (C-846). */
 export interface WorkerWizardView {
   readonly id: string;
   readonly machine_id: string;
@@ -2977,6 +2977,22 @@ export interface CardiganClient {
   workerWizardDefaults?(
     projectId: string,
   ): Promise<{ defaults: WorkerWizardDefaults }>;
+  /**
+   * C-846: whether a registered machine's written wizard draft can have
+   * remote launch enabled from its detail page. Owner's human session only.
+   */
+  machineRemoteLaunch?(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ remote_launch: "enabled" | "available" | "unavailable" }>;
+  /**
+   * C-846: start the wizard's checks on that draft; the session then goes
+   * through the launch preview and enabling like any other.
+   */
+  startMachineWorkerWizard?(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ wizard: WorkerWizardView }>;
   workerWizard?(
     projectId: string,
     wizardId: string,
@@ -3772,6 +3788,24 @@ export class HttpCardiganClient implements CardiganClient {
   ): Promise<{ defaults: WorkerWizardDefaults }> {
     return this.request(
       `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/defaults`,
+    );
+  }
+  machineRemoteLaunch(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ remote_launch: "enabled" | "available" | "unavailable" }> {
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/machines/${encodeURIComponent(machineId)}`,
+    );
+  }
+  startMachineWorkerWizard(
+    projectId: string,
+    machineId: string,
+  ): Promise<{ wizard: WorkerWizardView }> {
+    // Not resent: a lost reply is followed by a fresh read of the machine.
+    return this.request(
+      `/api/projects/${encodeURIComponent(projectId)}/worker-wizards/machines/${encodeURIComponent(machineId)}`,
+      { method: "POST", body: "{}", resend: false },
     );
   }
   workerWizard(

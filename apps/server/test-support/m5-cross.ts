@@ -39,7 +39,7 @@ export async function m5Cross(
   let now = Date.now(),
     cookie = "";
   const clock = { now: () => new Date(now).toISOString() };
-  const store = Store.open({ dataDir: f.dataDir, clock });
+  let store = Store.open({ dataDir: f.dataDir, clock });
   const logs: unknown[] = [];
   const staticDir = join(f.root, "web-assets");
   await mkdir(staticDir);
@@ -55,21 +55,23 @@ export async function m5Cross(
       return super.recordFailure(key, now);
     }
   })();
-  const web = await startWebServer({
-    launchProfiles: () => ["fixture", "codex-agent"],
-    ...webOptions,
-    ...(mergeGate ? { mergeGate: configuration } : {}),
-    store,
-    dataDir: f.dataDir,
-    clock,
-    loginLimiter: limiter,
-    config: resolveWebConfig(
-      {},
-      { port: 0, staticDir, loginFailureDelayMs: 1 },
-    ),
-    log: (event) => logs.push(event),
-    stream: { pollMs: 15, heartbeatMs: 30 },
-  });
+  const start = () =>
+    startWebServer({
+      launchProfiles: () => ["fixture", "codex-agent"],
+      ...webOptions,
+      ...(mergeGate ? { mergeGate: configuration } : {}),
+      store,
+      dataDir: f.dataDir,
+      clock,
+      loginLimiter: limiter,
+      config: resolveWebConfig(
+        {},
+        { port: 0, staticDir, loginFailureDelayMs: 1 },
+      ),
+      log: (event) => logs.push(event),
+      stream: { pollMs: 15, heartbeatMs: 30 },
+    });
+  let web = await start();
   const call = (
     path: string,
     options: {
@@ -169,7 +171,16 @@ export async function m5Cross(
     ...f,
     mergeGate: configuration,
     store: () => store,
-    web,
+    get web() {
+      return web;
+    },
+    /** C-846: stop the Web server and start it again on a reopened store. */
+    restart: async () => {
+      await web.close();
+      store.close();
+      store = Store.open({ dataDir: f.dataDir, clock });
+      web = await start();
+    },
     staticDir,
     call,
     mcp: f.call,

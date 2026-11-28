@@ -73,6 +73,7 @@ async function fixture(
     post,
     dataDir,
     refresh,
+    restart: f.restart,
     close: async () => {
       try {
         await f.close();
@@ -642,6 +643,310 @@ test.runIf(process.platform === "linux")(
       } finally {
         await f.close();
       }
+    }
+  },
+);
+
+const draftFile = (f: { root: string; project: { project_id: string } }) =>
+  join(f.root, `worker-${form.machine_id}-${f.project.project_id}.yaml`);
+const binding = (file: string) => {
+  const text = readFileSync(file, "utf8");
+  const root = /\n\s+root: (\S+)/u.exec(text)?.[1];
+  const files = /\n\s+file_helper: (\S+)/u.exec(text)?.[1];
+  const git = /\n\s+git_helper: (\S+)/u.exec(text)?.[1];
+  return { root, file_helper: files, git_helper: git };
+};
+
+test.runIf(process.platform === "linux")(
+  "C-846: a session continues from its step after the server restarts at any step",
+  async () => {
+    const gate = Promise.withResolvers<void>();
+    let hold = true;
+    const probe = vi.fn<WorkerProbeRunner>(async (step) => {
+      if (step === "account" && hold) {
+        hold = false;
+        await gate.promise;
+      }
+      return true;
+    });
+    const f = await fixture(probe);
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const s = wizard(await f.post("", form), 201);
+      const path = `/${s.id}`;
+      const status = async () => wizard(await f.call(f.base + path));
+      // Restart while the preview waits for confirmation.
+      await f.restart();
+      const kept = await status();
+      expect(kept.phase).toBe("preview");
+      expect(kept.preview.preview_id).toBe(s.preview.preview_id);
+      expect(
+        (await f.post(`${path}/confirm`, { preview_id: s.preview.preview_id }))
+          .status,
+      ).toBe(200);
+      await f.restart();
+      expect((await status()).phase).toBe("ready");
+      // Restart while the check runs: it did not finish, so it is failed and
+      // continues with another check.
+      expect((await f.post(`${path}/run`)).status).toBe(202);
+      expect((await status()).phase).toBe("running");
+      const restarting = f.restart();
+      gate.resolve();
+      await restarting;
+      const interrupted = await status();
+      expect(interrupted.phase).toBe("failed");
+      expect(interrupted.steps.some((step) => step.state === "running")).toBe(
+        false,
+      );
+      expect((await f.post(`${path}/run`)).status).toBe(202);
+      await vi.waitFor(async () =>
+        expect((await status()).phase).toBe("passed"),
+      );
+      await f.restart();
+      expect((await status()).phase).toBe("passed");
+      const launch = wizard(await f.post(`${path}/launch-preview`)).preview;
+      // The launch preview survives a restart too.
+      await f.restart();
+      expect((await status()).preview.preview_id).toBe(launch.preview_id);
+      expect(
+        wizard(
+          await f.post(`${path}/enable`, {
+            preview_id: launch.preview_id,
+            allow_remote_launch: true,
+          }),
+        ).phase,
+      ).toBe("enabled");
+      expect(
+        loadRuntimeWorkers(f.dataDir, join(f.root, "runtime-workers.yaml")),
+      ).toMatchObject([
+        { machine_id: form.machine_id, allow_remote_launch: true },
+      ]);
+      await f.restart();
+      expect((await status()).phase).toBe("enabled");
+      // Expiry still applies: the session is gone after 24 hours.
+      f.advance(86_400_001);
+      await f.restart();
+      expect((await f.call(f.base + path)).status).toBe(404);
+      expect(
+        f
+          .store()
+          .database.prepare("SELECT COUNT(*) AS n FROM worker_wizard_sessions")
+          .get(),
+      ).toEqual({ n: 0 });
+    } finally {
+      gate.resolve();
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "C-846: a cancelled session stays cancelled after a restart",
+  async () => {
+    const f = await fixture();
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const s = wizard(await f.post("", form), 201);
+      expect((await f.post(`/${s.id}/cancel`)).status).toBe(200);
+      await f.restart();
+      expect((await f.call(`${f.base}/${s.id}`)).status).toBe(404);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "C-846: entering the wizard again keeps a written draft's SteamOS /home layout; a /srv draft stays /srv",
+  async () => {
+    const f = await fixture();
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const project = f.project.project_id;
+      const home = `/home/cardigan-workers/${project}`;
+      const first = wizard(await f.post("", { ...form, layout: "home" }), 201);
+      wizard(
+        await f.post(`/${first.id}/confirm`, {
+          preview_id: first.preview.preview_id,
+        }),
+      );
+      const written = binding(draftFile(f));
+      expect(written).toEqual({
+        root: home,
+        file_helper: `${home}/libexec/worker-files.py`,
+        git_helper: `${home}/libexec/worker-git.py`,
+      });
+      // The plain form (no layout field) over the same machine.
+      const again = wizard(await f.post("", form), 201);
+      expect(again.preview.diff).toEqual([]);
+      expect(again.commands.directories).toContain(home);
+      expect(again.commands.directories).not.toContain("/srv/");
+      wizard(
+        await f.post(`/${again.id}/confirm`, {
+          preview_id: again.preview.preview_id,
+        }),
+      );
+      expect(binding(draftFile(f))).toEqual(written);
+      // An ordinary Linux draft keeps /srv.
+      rmSync(draftFile(f));
+      const plain = wizard(await f.post("", form), 201);
+      wizard(
+        await f.post(`/${plain.id}/confirm`, {
+          preview_id: plain.preview.preview_id,
+        }),
+      );
+      expect(binding(draftFile(f)).root).toBe(
+        `/srv/cardigan-workers/${project}`,
+      );
+      const next = wizard(await f.post("", form), 201);
+      expect(next.preview.diff).toEqual([]);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "C-846: the owner enables remote launch of an initialized machine from its detail page, which also puts it online",
+  async () => {
+    const probe = vi.fn<WorkerProbeRunner>(async () => true);
+    const f = await fixture(probe);
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const project = f.project.project_id;
+      const machinePath = `/machines/${form.machine_id}`;
+      const state = async () => {
+        const r = await f.call(`${f.base}${machinePath}`);
+        expect(r.status, r.text).toBe(200);
+        return (r.json as { remote_launch: string }).remote_launch;
+      };
+      // Not registered yet.
+      expect((await f.call(`${f.base}${machinePath}`)).status).toBe(404);
+      expect((await f.post(machinePath)).status).toBe(404);
+      // Onboarded through a paired draft up to the passed checks, then the
+      // session is lost (here: given up).
+      const s = wizard(await f.post("", { ...form, layout: "home" }), 201);
+      wizard(
+        await f.post(`/${s.id}/confirm`, { preview_id: s.preview.preview_id }),
+      );
+      expect((await f.post(`/${s.id}/run`)).status).toBe(202);
+      await vi.waitFor(async () =>
+        expect(wizard(await f.call(`${f.base}/${s.id}`)).phase).toBe("passed"),
+      );
+      expect((await f.post(`/${s.id}/cancel`)).status).toBe(200);
+      const registered = () =>
+        f.store().uow.read((tx) => tx.machines.get(project, form.machine_id));
+      expect(registered()).toMatchObject({ status: "offline" });
+      const written = readFileSync(draftFile(f), "utf8");
+      expect(await state()).toBe("available");
+      // Owner only, human session only, no body.
+      const bearer = { authorization: `Bearer ${f.token(f.primary.owner)}` };
+      expect(
+        (await f.call(`${f.base}${machinePath}`, { headers: bearer })).status,
+      ).toBe(403);
+      expect(
+        (
+          await f.call(`${f.base}${machinePath}`, {
+            method: "POST",
+            body: {},
+            headers: bearer,
+          })
+        ).status,
+      ).toBe(403);
+      expect(
+        (await f.post(machinePath, { allow_remote_launch: true })).status,
+      ).toBe(400);
+      const started = wizard(await f.post(machinePath), 202);
+      expect(started.phase).toBe("running");
+      expect(started).not.toHaveProperty("preview");
+      const path = `/${started.id}`;
+      await vi.waitFor(async () =>
+        expect(wizard(await f.call(f.base + path)).phase).toBe("passed"),
+      );
+      // The draft is continued as written: SteamOS paths stay under /home.
+      expect(readFileSync(draftFile(f), "utf8")).toBe(written);
+      expect(registered()).toMatchObject({ status: "offline" });
+      const launch = wizard(await f.post(`${path}/launch-preview`)).preview;
+      expect(launch.diff).toContainEqual({
+        field: "allow_remote_launch",
+        change: "false → true",
+      });
+      expect(
+        wizard(
+          await f.post(`${path}/enable`, {
+            preview_id: launch.preview_id,
+            allow_remote_launch: true,
+          }),
+        ).phase,
+      ).toBe("enabled");
+      expect(registered()).toMatchObject({ status: "online" });
+      const [worker] = loadRuntimeWorkers(
+        f.dataDir,
+        join(f.root, "runtime-workers.yaml"),
+      );
+      expect(worker).toMatchObject({
+        machine_id: form.machine_id,
+        allow_remote_launch: true,
+      });
+      expect(worker?.execution.agentRoot).toBe(
+        `/home/cardigan-workers/${project}`,
+      );
+      expect(await state()).toBe("enabled");
+      const again = await f.post(machinePath);
+      expect(again.status).toBe(409);
+      expect(again.text).toContain("worker_already_enabled");
+      const events = f
+        .store()
+        .uow.read((tx) => tx.global_events.listAfter(0))
+        .map((e) => e.type);
+      expect(events).toEqual(
+        expect.arrayContaining([
+          "worker_wizard_machine_resumed",
+          "worker_wizard_launch_enabled",
+        ]),
+      );
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.runIf(process.platform === "linux")(
+  "C-846: no detail-page enable without a draft, or with a draft edited by hand",
+  async () => {
+    const f = await fixture();
+    try {
+      await f.password(TEST_PASSWORD);
+      await f.login();
+      const machinePath = `/machines/${form.machine_id}`;
+      const s = wizard(await f.post("", form), 201);
+      wizard(
+        await f.post(`/${s.id}/confirm`, { preview_id: s.preview.preview_id }),
+      );
+      expect((await f.post(`/${s.id}/run`)).status).toBe(202);
+      await vi.waitFor(async () =>
+        expect(wizard(await f.call(`${f.base}/${s.id}`)).phase).toBe("passed"),
+      );
+      const file = draftFile(f);
+      const written = readFileSync(file, "utf8");
+      writeFileSync(file, `${written}timeout_ms: 4500\n`);
+      expect((await f.call(`${f.base}${machinePath}`)).json).toEqual({
+        remote_launch: "unavailable",
+      });
+      const edited = await f.post(machinePath);
+      expect(edited.status).toBe(409);
+      expect(edited.text).toContain("worker_config_conflict");
+      rmSync(file);
+      const missingDraft = await f.post(machinePath);
+      expect(missingDraft.status).toBe(404);
+      expect(missingDraft.text).toContain("worker_draft_missing");
+      expect(existsSync(join(f.root, "runtime-workers.yaml"))).toBe(false);
+    } finally {
+      await f.close();
     }
   },
 );

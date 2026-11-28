@@ -6,6 +6,7 @@ import {
   type Clock,
   DEFAULT_MAX_RUN_LIMIT,
   type MemberId,
+  saveMachine,
   setRunLimit,
 } from "@cardigan/domain";
 import {
@@ -17,21 +18,28 @@ import {
   loadMachineCapabilityCatalog,
   loadRuntimeWorkers,
   type MachineCheckJournal,
+  parseWorkerOnboarding,
   planWorkerFile,
   runCapacityMachines,
   suggestedForGpu,
   type WizardFilePlan,
   WorkerOnboardingError,
+  workerDraftForm,
+  workerDraftLayout,
   workerMcpConfig,
   workerPublicKey,
   workerWizardForm,
 } from "@cardigan/host";
+import { persistEffect } from "@cardigan/mcp-server";
 import {
+  deleteWorkerWizardSession,
+  listWorkerWizardSessions,
   persistRunLimitEffect,
   type ReadRepositories,
   readRunLimit,
   type Store,
   type StoreTransactionContext,
+  saveWorkerWizardSession,
   type WebSession,
 } from "@cardigan/store";
 import {
@@ -48,6 +56,7 @@ import {
 } from "./http.js";
 import { machineAudit } from "./machine-checks.js";
 import type { WizardHost } from "./machine-host.js";
+import { emptyState } from "./sql-state.js";
 import {
   checkRegistryCompatibility,
   checkWizard,
@@ -70,6 +79,11 @@ interface Session {
   steps: StepRecord[];
   check_id?: string;
   error?: string;
+  /**
+   * C-846: started from a registered machine's detail page with the draft
+   * it already has; enabling remote launch also puts the machine online.
+   */
+  origin?: "machine";
   /** C-706: the device pairing this draft came from and its initialisation. */
   pairing?: {
     id: string;
@@ -124,6 +138,112 @@ const preview = (plan: WizardFilePlan, now: number) => ({
   expires: now + 15 * 60_000,
   plan,
 });
+/** C-846: a machine id as the wizard form accepts it. */
+const MACHINE_ID = "[A-Za-z0-9][A-Za-z0-9._-]{0,79}";
+/** C-846: the persisted form of a session; the parsed config is rebuilt on load. */
+function stored(s: Session) {
+  const { draft, preview: p, ...rest } = s;
+  return {
+    version: 1,
+    ...rest,
+    draft: { label: draft.label, raw: draft.raw, commands: draft.commands },
+    ...(p
+      ? {
+          preview: {
+            id: p.id,
+            expires: p.expires,
+            plan: {
+              name: p.plan.name,
+              revision: p.plan.revision,
+              bytes: p.plan.bytes.toString("base64"),
+              guardName: p.plan.guardName,
+              guardRevision: p.plan.guardRevision,
+              diff: p.plan.diff,
+              priorDigest: p.plan.binding.priorDigest ?? null,
+            },
+          },
+        }
+      : {}),
+  };
+}
+const PHASES = ["preview", "ready", "running", "failed", "passed", "enabled"];
+/**
+ * C-846: a session read back after a restart. The configuration is parsed
+ * again under this host's data directory; a check that was running when the
+ * server stopped did not finish, so the session continues from its failure.
+ */
+function restored(doc: unknown, dataDir: string): Session | undefined {
+  type Doc = Omit<Session, "draft" | "preview"> & {
+    version: number;
+    draft: { label: string; raw: unknown; commands: Draft["commands"] };
+    preview?: {
+      id: string;
+      expires: number;
+      plan: Omit<WizardFilePlan, "binding" | "bytes"> & {
+        bytes: string;
+        priorDigest: string | null;
+      };
+    };
+  };
+  const d = doc as Doc;
+  if (
+    d?.version !== 1 ||
+    typeof d.id !== "string" ||
+    typeof d.project !== "string" ||
+    typeof d.machine !== "string" ||
+    typeof d.member !== "string" ||
+    typeof d.expires !== "number" ||
+    !PHASES.includes(d.phase) ||
+    !Array.isArray(d.steps) ||
+    typeof d.draft?.label !== "string"
+  )
+    return undefined;
+  const config = parseWorkerOnboarding(d.draft.raw, dataDir);
+  if (
+    config.worker.machine_id !== d.machine ||
+    config.worker.project_id !== d.project
+  )
+    return undefined;
+  const { version: _version, draft, preview: p, ...rest } = d;
+  const s: Session = {
+    ...rest,
+    draft: {
+      label: draft.label,
+      raw: draft.raw as Draft["raw"],
+      config,
+      commands: draft.commands,
+    },
+    ...(p
+      ? {
+          preview: {
+            id: p.id,
+            expires: p.expires,
+            plan: {
+              binding: {
+                config,
+                dataDir,
+                priorDigest: p.plan.priorDigest ?? undefined,
+              },
+              name: p.plan.name,
+              revision: p.plan.revision,
+              bytes: Buffer.from(p.plan.bytes, "base64"),
+              guardName: p.plan.guardName,
+              guardRevision: p.plan.guardRevision,
+              diff: p.plan.diff,
+            },
+          },
+        }
+      : {}),
+  };
+  if (s.phase === "running") {
+    s.phase = "failed";
+    s.error = "worker_check_interrupted";
+    s.steps = s.steps.map((step) =>
+      step.state === "running" ? { ...step, state: "pending" } : step,
+    );
+  }
+  return s;
+}
 /**
  * C-565: the HTTPS `/mcp` address to prefill the form with, from validated
  * host configuration only: this project's remote bindings first, else one
@@ -223,6 +343,7 @@ export class WorkerWizards {
     private max?: ((id: string) => number) | undefined,
     private pairings?: DevicePairings | undefined,
   ) {
+    this.load();
     pairings?.attach({
       state: (id) => {
         const s = this.sessions.get(id);
@@ -233,6 +354,44 @@ export class WorkerWizards {
       script: (id) => this.deviceScript(id),
       completed: (id, ok) => this.deviceCompleted(id, ok),
     });
+  }
+  /** C-846: sessions kept before the last restart, minus expired ones. */
+  private load() {
+    const host = this.host;
+    if (!host || this.signal.aborted) return;
+    const now = Date.parse(this.clock.now());
+    for (const row of listWorkerWizardSessions(this.store.database)) {
+      let s: Session | undefined;
+      try {
+        s = restored(row.doc, host.dataDir);
+      } catch {
+        s = undefined;
+      }
+      if (!s || s.id !== row.id || s.expires <= now) {
+        deleteWorkerWizardSession(this.store.database, row.id);
+        continue;
+      }
+      this.sessions.set(s.id, s);
+    }
+  }
+  /** C-846: record the session as it is now. */
+  private save(s: Session) {
+    if (this.sessions.get(s.id) !== s) return;
+    this.store.uow.run(() =>
+      saveWorkerWizardSession(this.store.database, {
+        id: s.id,
+        project_id: s.project,
+        expires_at: s.expires,
+        doc: stored(s),
+      }),
+    );
+  }
+  /** C-846: forget a session here and in the database. */
+  private drop(id: string) {
+    this.sessions.delete(id);
+    this.store.uow.run(() =>
+      deleteWorkerWizardSession(this.store.database, id),
+    );
   }
   /** A live paired session, or the device's view of why not. */
   private paired(id: string) {
@@ -281,7 +440,10 @@ export class WorkerWizards {
           : "这份向导配置不能生成初始化脚本，请按操作手册手工准备。",
       );
     }
-    if (pairing.init === "waiting") pairing.init = "fetched";
+    if (pairing.init === "waiting") {
+      pairing.init = "fetched";
+      this.save(s);
+    }
     return script;
   }
   /**
@@ -301,6 +463,7 @@ export class WorkerWizards {
       );
     pairing.init = ok ? "succeeded" : "failed";
     pairing.at = this.clock.now();
+    this.save(s);
     this.store.uow.run((tx) =>
       machineAudit(tx, this.clock, "worker_wizard_device_initialized", {
         member_id: s.member,
@@ -448,6 +611,16 @@ export class WorkerWizards {
     s.phase = "running";
     delete s.preview;
     delete s.error;
+    this.save(s);
+    // After the server began closing the store may be gone; the session is
+    // then read back as interrupted.
+    const record = () => {
+      try {
+        this.save(s);
+      } catch {
+        // Only resuming after a restart depends on it.
+      }
+    };
     const done = check.done.then(
       (ok) => {
         s.phase = ok ? "passed" : "failed";
@@ -462,14 +635,200 @@ export class WorkerWizards {
               pairing.run_limit.value
               ? "applied"
               : "kept";
+        record();
       },
       (e) => {
         s.phase = "failed";
         s.error = safeError(e);
+        record();
       },
     );
     this.pending.add(done);
     void done.then(() => this.pending.delete(done));
+  }
+  /** Expired sessions are dropped unless a check still runs. */
+  private expire(now: number) {
+    for (const [key, s] of this.sessions)
+      if (s.expires <= now && s.phase !== "running") this.drop(key);
+  }
+  /**
+   * The same draft, checks and preview as a form typed into the wizard.
+   * C-846: a draft already written for this binding keeps its layout (a
+   * SteamOS work root under /home), and a session started from a machine's
+   * detail page continues that written draft without a new preview.
+   */
+  private create(
+    host: WizardHost,
+    project: string,
+    member: string,
+    form: Record<string, unknown>,
+    now: number,
+    audit: (type: string, s: Session) => void,
+    origin?: "machine",
+  ) {
+    let draft = workerWizardForm(host.root, host.dataDir, project, form);
+    const machine = draft.config.worker.machine_id;
+    if (
+      form.layout === undefined &&
+      draft.config.worker.os === "linux" &&
+      workerDraftLayout(host.root, project, machine) === "home"
+    )
+      draft = workerWizardForm(host.root, host.dataDir, project, {
+        ...form,
+        layout: "home",
+      });
+    this.store.uow.read((tx) =>
+      checkRegistryCompatibility(this.store, tx, draft),
+    );
+    const plan = planWorkerFile(
+      host.root,
+      host.dataDir,
+      draft.raw,
+      draft.config,
+    );
+    // Continuing a written draft changes nothing in it.
+    if (origin && plan.diff.length > 0)
+      throw new WorkerOnboardingError("worker_config_conflict");
+    const { priorDigest } = plan.binding;
+    if (priorDigest && priorDigest !== draft.config.digest)
+      plan.diff.push({ field: "completed_checks", change: "reset" });
+    for (const s of this.sessions.values())
+      if (
+        s.project === project &&
+        s.machine === machine &&
+        s.member === member
+      ) {
+        if (s.phase === "running") throw stale();
+        this.drop(s.id);
+      }
+    if (this.sessions.size >= 64)
+      throw new HttpRejection(429, "capacity", "向导会话已满");
+    const s: Session = {
+      id: randomUUID(),
+      machine,
+      project,
+      member,
+      draft,
+      priorDigest,
+      expires: now + 86400_000,
+      phase: origin ? "ready" : "preview",
+      steps: initialSteps(),
+      ...(origin ? { origin } : { preview: preview(plan, now) }),
+    };
+    audit(origin ? "machine_resumed" : "previewed", s);
+    this.sessions.set(s.id, s);
+    this.save(s);
+    return s;
+  }
+  /**
+   * C-846: enabling remote launch from a machine's detail page also puts a
+   * freshly onboarded (offline) machine online for this project, in the same
+   * transaction. A drained or degraded machine keeps its status.
+   */
+  private online(tx: StoreTransactionContext, s: Session) {
+    const m = tx.machines.get(s.project, s.machine);
+    if (m?.status !== "offline") return;
+    const effect = saveMachine(
+      { ...emptyState(tx, s.project), machines: [m] },
+      { kind: "human", project_id: s.project },
+      { machine: { ...m, status: "online" }, operation: "update" },
+      { clock: this.clock, ids: tx.ids },
+    );
+    if (!effect.ok)
+      throw new HttpRejection(409, effect.error.code, effect.error.message);
+    persistEffect(tx, s.project, effect.value);
+  }
+  /**
+   * C-846: a registered machine whose wizard draft is written: `GET` says
+   * whether remote launch can be enabled from its detail page, `POST` starts
+   * the wizard's checks on that draft; the launch preview and enabling then
+   * go through the session like any other.
+   */
+  private async serveMachine(
+    req: IncomingMessage,
+    res: ServerResponse,
+    project: string,
+    machine: string,
+    authorize: (tx?: ReadRepositories) => string,
+    host: WizardHost,
+  ) {
+    const read = req.method === "GET";
+    if (!read && req.method !== "POST") methodNotAllowed(["GET", "POST"]);
+    if (!read && Object.keys(await readJsonBody(req)).length > 0)
+      throw invalid();
+    const member = authorize(),
+      now = Date.parse(this.clock.now());
+    this.expire(now);
+    const label =
+      machine === "local"
+        ? undefined
+        : this.store.uow.read((tx) => tx.machines.get(project, machine)?.label);
+    if (label === undefined) throw missing();
+    const enabled = () =>
+      loadRuntimeWorkers(
+        host.dataDir,
+        join(host.root, "runtime-workers.yaml"),
+      ).some(
+        (w) =>
+          w.machine_id === machine &&
+          w.project_id === project &&
+          w.allow_remote_launch,
+      );
+    const draft = () =>
+      workerDraftForm(host.root, host.dataDir, project, machine, label);
+    if (read) {
+      let state: "enabled" | "available" | "unavailable";
+      try {
+        state = enabled() ? "enabled" : draft() ? "available" : "unavailable";
+      } catch {
+        state = "unavailable";
+      }
+      return sendJson(res, 200, { remote_launch: state });
+    }
+    try {
+      if (enabled())
+        throw new HttpRejection(
+          409,
+          "worker_already_enabled",
+          "这台机器已开启远程派发",
+        );
+      const form = draft();
+      if (!form)
+        throw new HttpRejection(
+          404,
+          "worker_draft_missing",
+          "这台机器没有向导写入的接入配置，请用“添加 worker”接入。",
+        );
+      const running = [...this.sessions.values()].find(
+        (s) =>
+          s.project === project &&
+          s.machine === machine &&
+          s.member === member &&
+          s.phase === "running",
+      );
+      if (running) return sendJson(res, 200, { wizard: this.view(running) });
+      const s = this.create(
+        host,
+        project,
+        member,
+        form,
+        now,
+        (type, s) =>
+          this.store.uow.run((tx) =>
+            machineAudit(tx, this.clock, `worker_wizard_${type}`, {
+              member_id: member,
+              project_id: project,
+              machine_id: s.machine,
+              wizard_id: s.id,
+            }),
+          ),
+        "machine",
+      );
+      this.startCheck(s, authorize);
+      return sendJson(res, 202, { wizard: this.view(s) });
+    } catch (e) {
+      throw rejection(e);
+    }
   }
   async settled() {
     await Promise.allSettled(this.pending);
@@ -505,6 +864,14 @@ export class WorkerWizards {
         defaults: knownMcpUrl(host, project) ?? {},
       });
     }
+    // C-846: `/worker-wizards/machines/<id>` continues a registered
+    // machine's written draft from its detail page.
+    const registered = new RegExp(
+      `^/worker-wizards/machines/(${MACHINE_ID})$`,
+      "u",
+    ).exec(rest)?.[1];
+    if (registered !== undefined)
+      return this.serveMachine(req, res, project, registered, authorize, host);
     // C-705: `/worker-wizards/pairing` turns a device pairing code into a draft.
     const pairing = rest === "/worker-wizards/pairing";
     const match = pairing
@@ -520,8 +887,7 @@ export class WorkerWizards {
     const body = read ? {} : await readJsonBody(req);
     const member = authorize(),
       now = Date.parse(this.clock.now());
-    for (const [key, s] of this.sessions)
-      if (s.expires <= now && s.phase !== "running") this.sessions.delete(key);
+    this.expire(now);
     const audit = (type: string, s: Session) =>
       this.store.uow.run((tx) =>
         machineAudit(tx, this.clock, `worker_wizard_${type}`, {
@@ -531,49 +897,8 @@ export class WorkerWizards {
           wizard_id: s.id,
         }),
       );
-    // The same draft, checks and preview as a form typed into the wizard.
-    const create = (form: Record<string, unknown>) => {
-      const draft = workerWizardForm(host.root, host.dataDir, project, form),
-        machine = draft.config.worker.machine_id;
-      this.store.uow.read((tx) =>
-        checkRegistryCompatibility(this.store, tx, draft),
-      );
-      const plan = planWorkerFile(
-        host.root,
-        host.dataDir,
-        draft.raw,
-        draft.config,
-      );
-      const { priorDigest } = plan.binding;
-      if (priorDigest && priorDigest !== draft.config.digest)
-        plan.diff.push({ field: "completed_checks", change: "reset" });
-      for (const s of this.sessions.values())
-        if (
-          s.project === project &&
-          s.machine === machine &&
-          s.member === member
-        ) {
-          if (s.phase === "running") throw stale();
-          this.sessions.delete(s.id);
-        }
-      if (this.sessions.size >= 64)
-        throw new HttpRejection(429, "capacity", "向导会话已满");
-      const s: Session = {
-        id: randomUUID(),
-        machine,
-        project,
-        member,
-        draft,
-        priorDigest,
-        expires: now + 86400_000,
-        phase: "preview",
-        steps: initialSteps(),
-        preview: preview(plan, now),
-      };
-      audit("previewed", s);
-      this.sessions.set(s.id, s);
-      return s;
-    };
+    const create = (form: Record<string, unknown>) =>
+      this.create(host, project, member, form, now, audit);
     try {
       if (pairing) {
         if (
@@ -627,6 +952,7 @@ export class WorkerWizards {
           device: found.device,
           run_limit: { value: runLimit, state: "pending" },
         };
+        this.save(s);
         this.store.uow.run((tx) =>
           machineAudit(tx, this.clock, "worker_wizard_pairing_claimed", {
             member_id: member,
@@ -676,7 +1002,7 @@ export class WorkerWizards {
       if (s.phase === "running") throw stale();
       if (action === "cancel") {
         audit("cancelled", s);
-        this.sessions.delete(id);
+        this.drop(id);
         return sendJson(res, 200, { cancelled: true });
       }
       const assertPassed = (tx: ReadRepositories) => {
@@ -701,6 +1027,7 @@ export class WorkerWizards {
           ),
           now,
         );
+        this.save(s);
         audit("launch_previewed", s);
       } else if (action === "confirm" || action === "enable") {
         const p = s.preview;
@@ -716,6 +1043,8 @@ export class WorkerWizards {
               if (action === "enable") assertPassed(tx);
               else checkRegistryCompatibility(this.store, tx, s.draft);
               apply();
+              if (action === "enable" && s.origin === "machine")
+                this.online(tx, s);
               machineAudit(
                 tx,
                 this.clock,
@@ -737,23 +1066,27 @@ export class WorkerWizards {
         }
         delete s.preview;
         s.phase = action === "enable" ? "enabled" : "ready";
+        this.save(s);
       } else if (action === "run") {
         this.startCheck(s, authorize);
         return sendJson(res, 202, { wizard: this.view(s) });
       }
       return sendJson(res, 200, { wizard: this.view(s) });
     } catch (e) {
-      if (e instanceof HttpRejection) throw e;
-      const code = safeError(e);
-      throw new HttpRejection(
-        code === "worker_form_invalid" || code === "worker_config_invalid"
-          ? 400
-          : 409,
-        code,
-        code === "worker_shared_yaml"
-          ? "派发开关使用 YAML 锚点，请在主机上核对并拆分共享字段后重新预览。"
-          : "请核对向导配置、文件权限和当前预览。",
-      );
+      throw rejection(e);
     }
   }
+}
+function rejection(e: unknown) {
+  if (e instanceof HttpRejection) return e;
+  const code = safeError(e);
+  return new HttpRejection(
+    code === "worker_form_invalid" || code === "worker_config_invalid"
+      ? 400
+      : 409,
+    code,
+    code === "worker_shared_yaml"
+      ? "派发开关使用 YAML 锚点，请在主机上核对并拆分共享字段后重新预览。"
+      : "请核对向导配置、文件权限和当前预览。",
+  );
 }
