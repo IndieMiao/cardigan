@@ -807,6 +807,12 @@ const schemas = {
       .describe(
         "不合并卡上本产出项的起点（完整提交 SHA 或分支名），优先于卡上的起点；传 null 清除。已有 worktree 后不能改",
       ),
+    depends_on: z
+      .array(id("work_item"))
+      .optional()
+      .describe(
+        "PM Ops only: replace this item's same-card dependencies; [] clears. Refused when dependencies and verification targets would wait on each other in a cycle.",
+      ),
     review_limit_decision: z
       .object({
         pause_plan: pausePlan,

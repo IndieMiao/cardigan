@@ -702,6 +702,30 @@ test("§6.4 dependency completed notifies the downstream Assignment", () => {
   expect(recipients(result)).toEqual(["assignment:A-2"]);
 });
 
+test("C-851 changed dependencies that are all met wake the producer; unmet ones wake nobody", () => {
+  const route = (dependency: "accepted" | "in_progress") =>
+    routeEvent({
+      event: event("work_item_updated", {
+        work_item_id: "W-2",
+        depends_on: ["W-1"],
+        previous_depends_on: ["W-3"],
+      }),
+      snapshot: snapshot({
+        work_items: [
+          workItem("W-1", { status: dependency }),
+          workItem("W-2", {
+            depends_on: ["W-1"],
+            status: "todo",
+            assignment_id: "A-2",
+          }),
+        ],
+      }),
+    });
+  expect(rules(route("accepted"))).toEqual(["C-851/dependencies changed"]);
+  expect(recipients(route("accepted"))).toEqual(["assignment:A-2"]);
+  expect(route("in_progress").notifications).toEqual([]);
+});
+
 test.each([
   "valid",
   "self",
@@ -1615,6 +1639,9 @@ test("C-370 dependency events notify PM; ready early work also notifies its actu
     "card_dependencies_attention",
     "card_dependencies_backlog_ready",
     "card_dependencies_released",
+    // C-851
+    "work_wait_cycle_detected",
+    "work_dependency_stalled",
   ])
     expect(
       recipients(

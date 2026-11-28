@@ -826,3 +826,60 @@ test("C-728: PM registers a no-merge card's repository and start point", async (
   });
   expect(snapshot().cards[0]).not.toHaveProperty("start_point");
 });
+
+test("C-851: work-item update replaces or clears depends_on and refuses a wait cycle", async () => {
+  const dev = snapshot().work_items.find(
+    (w) => w.kind === "produce" && w.template_key === "development",
+  );
+  expect(
+    await run([
+      "work-item",
+      "create",
+      "C-1",
+      "--kind",
+      "produce",
+      "--title",
+      "Signing",
+      "--role",
+      dev?.role_id as string,
+      "--acceptance",
+      "signed",
+    ]),
+  ).toBe(0);
+  const signing = snapshot().work_items.find((w) => w.title === "Signing");
+  const signingId = signing?.id as string;
+  expect(
+    await run([
+      "work-item",
+      "update",
+      signingId,
+      "--depends-on",
+      dev?.id as string,
+    ]),
+  ).toBe(0);
+  expect(
+    snapshot().work_items.find((w) => w.id === signingId)?.depends_on,
+  ).toEqual([dev?.id]);
+  expect(snapshot().timeline.at(-1)?.body).toContain(`依赖：无 → ${dev?.id}`);
+  // The development item waiting for Signing closes the loop: refused, items named.
+  expect(
+    await run([
+      "work-item",
+      "update",
+      dev?.id as string,
+      "--depends-on",
+      signingId,
+    ]),
+  ).not.toBe(0);
+  expect(errors.join("\n")).toContain("成环");
+  expect(errors.join("\n")).toContain(signingId);
+  expect(
+    await run(["work-item", "update", signingId, "--depends-on", "none"]),
+  ).toBe(0);
+  expect(
+    snapshot().work_items.find((w) => w.id === signingId)?.depends_on,
+  ).toEqual([]);
+  expect(
+    await run(["work-item", "update", signingId, "--depends-on", "C-1"]),
+  ).toBe(2);
+});
