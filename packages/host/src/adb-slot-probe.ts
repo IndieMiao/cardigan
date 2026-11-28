@@ -69,7 +69,8 @@ def emu_kill(p):
    except OSError:
     t=b''
    s.sendall(b'auth '+t+b'\\r\\n'); read_ok(s)
-  s.sendall(b'kill\\r\\n'); read_ok(s)
+  # C-848: no need to wait for the goodbye; what stays up is stopped by PID.
+  s.settimeout(0.3); s.sendall(b'kill\\r\\n'); read_ok(s)
  except OSError:
   pass
  finally:
@@ -80,7 +81,7 @@ def adb_kill(p):
  except OSError:
   return
  try:
-  s.sendall(b'0009host:kill'); s.recv(4)
+  s.settimeout(0.5); s.sendall(b'0009host:kill'); s.recv(4)
  except OSError:
   pass
  finally:
@@ -189,31 +190,37 @@ def emu_port(argv):
   if a in ('-port','-ports'):
    v=argv[i+1].split(',')[0]
    if v.isdigit() and 0<int(v)<65536: return int(v)
-def emu_procs():
- uid=os.getuid(); out=[]
+def snapshot():
+ # {pid: (start, argv, ppid)} of this account's processes (not this one);
+ # None when the process table cannot be read.
+ uid=os.getuid(); me=os.getpid(); out={}
  if sys.platform.startswith('linux'):
   for d in os.listdir('/proc'):
-   if not d.isdigit() or int(d)==os.getpid(): continue
+   if not d.isdigit() or int(d)==me: continue
    try:
     if os.stat('/proc/'+d).st_uid!=uid: continue
     with open('/proc/%s/cmdline'%d,'rb') as f: argv=[a.decode('utf-8','replace') for a in f.read(65536).split(b'\\0') if a]
-    if not argv or not emu_kind(argv[0]): continue
     with open('/proc/%s/stat'%d,'rb') as f: x=f.read(4096).rsplit(b')',1)[1].split()
-    start,ppid=x[19].decode(),int(x[1])
+    if x[0]==b'Z': continue
+    out[int(d)]=(x[19].decode(),argv,int(x[1]))
    except (OSError,IndexError,ValueError):
     continue
-   out.append((int(d),start,argv,proc_session(int(d)),ppid))
   return out
  try:
   o=subprocess.run(['/bin/ps','-ww','-U',str(uid),'-o','pid=,ppid=,lstart=,command='],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
  except (OSError,subprocess.SubprocessError):
   return None
+ last=None
  for l in o.splitlines():
   x=l.split()
-  if len(x)<8 or not x[0].isdigit() or not x[1].isdigit() or not emu_kind(x[7]): continue
-  out.append((int(x[0]),' '.join(x[2:7]),x[7:],None,int(x[1])))
+  if len(x)>=8 and x[0].isdigit() and x[1].isdigit():
+   last=int(x[0])
+   if last!=me: out[last]=(' '.join(x[2:7]),x[7:],int(x[1]))
+  elif last in out:
+   # An argument with a newline continues on the next line.
+   out[last][1].extend(x)
  return out
-def proc_session(pid):
+def session_of(pid):
  try:
   with open('/proc/%d/environ'%pid,'rb') as f:
    for e in f.read(262144).split(b'\\0'):
@@ -222,27 +229,16 @@ def proc_session(pid):
      if SESSION.fullmatch(v): return v
  except OSError:
   pass
-def proc_info(pid):
- # (start, argv, ppid, session) of this account's process, or None.
+def emu_procs(snap=None):
+ snap=snapshot() if snap is None else snap
+ if snap is None: return None
+ return [(pid,v[0],v[1],session_of(pid),v[2]) for pid,v in sorted(snap.items()) if v[1] and emu_kind(v[1][0])]
+def listeners(want):
+ # {port: PIDs} of this account's processes listening on these ports, in one pass.
+ uid=os.getuid(); want=set(want); out={}
+ if not want: return out
  if sys.platform.startswith('linux'):
-  try:
-   if os.stat('/proc/%d'%pid).st_uid!=os.getuid(): return None
-   with open('/proc/%d/cmdline'%pid,'rb') as f: argv=[a.decode('utf-8','replace') for a in f.read(65536).split(b'\\0') if a]
-   with open('/proc/%d/stat'%pid,'rb') as f: x=f.read(4096).rsplit(b')',1)[1].split()
-   return (x[19].decode(),argv,int(x[1]),proc_session(pid))
-  except (OSError,IndexError,ValueError):
-   return None
- try:
-  x=subprocess.run(['/bin/ps','-ww','-o','uid=,ppid=,lstart=,command=','-p',str(pid)],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout.split()
- except (OSError,subprocess.SubprocessError):
-  return None
- if len(x)<8 or not x[0].isdigit() or int(x[0])!=os.getuid() or not x[1].isdigit(): return None
- return (' '.join(x[2:7]),x[7:],int(x[1]),None)
-def listeners(p):
- # PIDs of this account's processes listening on loopback port p.
- uid=os.getuid(); out=set()
- if sys.platform.startswith('linux'):
-  inodes=set()
+  inode={}
   for f in ('/proc/net/tcp','/proc/net/tcp6'):
    try:
     with open(f) as h: rows=h.read().splitlines()[1:]
@@ -251,25 +247,31 @@ def listeners(p):
    for r in rows:
     x=r.split()
     try:
-     if len(x)>9 and x[3]=='0A' and int(x[1].rsplit(':',1)[1],16)==p and int(x[7])==uid: inodes.add('socket:[%s]'%x[9])
-    except ValueError:
+     if len(x)>9 and x[3]=='0A' and int(x[1].rsplit(':',1)[1],16) in want and int(x[7])==uid: inode['socket:[%s]'%x[9]]=int(x[1].rsplit(':',1)[1],16)
+    except (ValueError,IndexError):
      pass
-  if not inodes: return out
+  if not inode: return out
   for d in os.listdir('/proc'):
    if not d.isdigit() or int(d)==os.getpid(): continue
    try:
     if os.stat('/proc/'+d).st_uid!=uid: continue
     for fd in os.listdir('/proc/%s/fd'%d):
-     if os.readlink('/proc/%s/fd/%s'%(d,fd)) in inodes:
-      out.add(int(d)); break
+     l=os.readlink('/proc/%s/fd/%s'%(d,fd))
+     if l in inode: out.setdefault(inode[l],set()).add(int(d))
    except OSError:
     continue
   return out
  try:
-  o=subprocess.run(['/usr/sbin/lsof','-nP','-a','-u',str(uid),'-iTCP:%d'%p,'-sTCP:LISTEN','-t'],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
+  o=subprocess.run(['/usr/sbin/lsof','-nP','-a','-u',str(uid),'-iTCP','-sTCP:LISTEN','-Fpn'],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
  except (OSError,subprocess.SubprocessError):
   return out
- return {int(v) for v in o.split() if v.isdigit() and int(v)!=os.getpid()}
+ pid=None
+ for l in o.splitlines():
+  if l[:1]=='p' and l[1:].isdigit(): pid=int(l[1:])
+  elif l[:1]=='n' and pid is not None:
+   v=l.rsplit(':',1)[-1]
+   if v.isdigit() and int(v) in want: out.setdefault(int(v),set()).add(pid)
+ return out
 def str_list(v):
  return [x for x in v if isinstance(x,str) and SESSION.fullmatch(x)] if isinstance(v,list) else []
 SESS=str_list([c.get('session')])
@@ -279,42 +281,50 @@ def slot_procs():
  # emulator on one of its console ports or naming the Run (Linux), and any
  # emulator or adb process listening on its ports. A process naming another
  # Run that still runs is never one of them, nor are the ports it holds.
- # ({pid: (start,kind,port,ppid)}, kept ports)
+ # ({pid: (start,kind,port,ppid)}, kept ports, snapshot)
+ snap=snapshot()
+ # No process table: no answer, so the host retries instead of a false release.
+ if snap is None: sys.exit(0)
  found={}; kept=set(); keep_ports=set()
- listed=emu_procs()
- # No process list: no answer, so the host retries instead of a false release.
- if listed is None: sys.exit(0)
- for pid,start,argv,session,ppid in listed:
-  port=emu_port(argv)
+ for pid,(start,argv,ppid) in snap.items():
+  k=emu_kind(argv[0]) if argv else None
+  if not k: continue
+  port=emu_port(argv); session=session_of(pid)
   if session in KEEP:
    kept.add(pid)
    if port is not None: keep_ports.update((port,port+1))
    continue
   if (port is not None and port in emu) or (session is not None and session in SESS):
-   found[pid]=(start,emu_kind(argv[0]),port,ppid)
- for p in ports:
-  for pid in listeners(p):
+   found[pid]=(start,k,port,ppid)
+ for p,pids in listeners(ports).items():
+  for pid in pids:
    if pid in kept:
     keep_ports.add(p); continue
-   if pid in found: continue
-   i=proc_info(pid)
-   if not i or not i[1]: continue
-   start,argv,ppid,session=i
-   if session in KEEP:
+   if pid in found or pid not in snap or not snap[pid][1]: continue
+   start,argv,ppid=snap[pid]
+   if session_of(pid) in KEEP:
     keep_ports.add(p); continue
    k=emu_kind(argv[0]) or ('adb' if os.path.basename(argv[0])=='adb' else None)
    if k: found[pid]=(start,k,p,ppid)
  for pid in [pid for pid in found if found[pid][2] in keep_ports]: found.pop(pid)
- return found,keep_ports
-def occupied(procs,keep):
- # Listening ports plus processes of the slot (a qemu the port check missed).
- busy={p for p in ports if p not in keep and up(p)}|{v[2] for v in procs.values() if v[2] in ports}
+ return found,keep_ports,snap
+def occupied(procs):
+ # Listening ports (a running Run's too: the slot is not free while it is
+ # held) plus processes of the slot the port check missed.
+ busy={p for p in ports if up(p)}|{v[2] for v in procs.values() if v[2] in ports}
  return len(busy)+sum(1 for v in procs.values() if v[2] not in ports)
-def same(pid,start):
- i=proc_info(pid)
- return bool(i) and i[0]==start
-def gone(procs):
- return [pid for pid in procs if not same(pid,procs[pid][0])]
+def alive(pid):
+ if sys.platform.startswith('linux'):
+  try:
+   with open('/proc/%d/stat'%pid,'rb') as f: return f.read(4096).rsplit(b')',1)[1].split()[0]!=b'Z'
+  except (OSError,IndexError):
+   return False
+ try:
+  os.kill(pid,0); return True
+ except ProcessLookupError:
+  return False
+ except OSError:
+  return True
 def emulators():
  found=emu_procs()
  if found is None:
@@ -349,41 +359,44 @@ if c.get('action')=='usb_off':
  usb_off(); sys.exit(0)
 if c.get('action') in ('emulators','emulator_stop'):
  (emulators if c['action']=='emulators' else emulator_stop)(); sys.exit(0)
-t0=time.monotonic()
-procs,keep=slot_procs()
-open_ports=[p for p in ports if p not in keep]
-found=occupied(procs,keep)
+# C-848: the whole pass ends well inside the host's 10 s call limit, so what
+# was found and stopped is always reported.
+t0=time.monotonic(); deadline=t0+7.5
+procs,keep,snap=slot_procs()
+found=occupied(procs)
+left=found
 signalled=[]
 if c.get('action')=='release' and found:
  for p in emu:
   if p not in keep and up(p): emu_kill(p)
  for p in adb:
   if p not in keep and up(p): adb_kill(p)
- end=t0+float(c.get('wait',3))
- while (any(up(p) for p in open_ports) or len(gone(procs))<len(procs)) and time.monotonic()<end: time.sleep(0.2)
- # C-848: what the console and adb protocol did not close (no answer under
- # load, a token in another HOME, an emulator off its console) is stopped
- # by PID, checked against its start stamp so a reused PID is never hit.
- rest=dict(procs)
- more,keep2=slot_procs()
- rest.update(more); keep|=keep2
- for pid in gone(rest): rest.pop(pid,None)
- procs.update(rest)
- for sig,wait in ((signal.SIGTERM,2.5),(signal.SIGKILL,1.0)):
+ free=[p for p in ports if p not in keep]
+ end=min(t0+3.0,deadline-3.5)
+ while (any(up(p) for p in free) or any(alive(pid) for pid in procs)) and time.monotonic()<end: time.sleep(0.2)
+ # What the console and adb protocol did not close (no answer under load, a
+ # token in another HOME, an emulator off its console) is stopped by PID,
+ # only while it still has the start stamp it was found with.
+ more,keep2,snap=slot_procs()
+ keep|=keep2
+ rest={pid:v for pid,v in procs.items() if pid in snap and snap[pid][0]==v[0] and v[2] not in keep}
+ rest.update(more)
+ procs.update(more)
+ for sig,wait in ((signal.SIGTERM,2.0),(signal.SIGKILL,1.0)):
   if not rest: break
-  for pid in list(rest):
+  for pid in rest:
    try:
     os.kill(pid,sig)
    except OSError:
     pass
    if pid not in signalled: signalled.append(pid)
-  end=time.monotonic()+wait
+  end=min(deadline,time.monotonic()+wait)
   while rest and time.monotonic()<end:
-   time.sleep(0.2)
-   for pid in gone(rest): rest.pop(pid,None)
- end=time.monotonic()+1.0
- while any(up(p) for p in open_ports if p not in keep) and time.monotonic()<end: time.sleep(0.2)
-left=occupied(*slot_procs()) if c.get('action')=='release' else found
+   time.sleep(0.1)
+   rest={pid:v for pid,v in rest.items() if alive(pid)}
+ end=min(deadline,time.monotonic()+1.0)
+ while any(up(p) for p in ports if p not in keep) and time.monotonic()<end: time.sleep(0.1)
+ left=occupied(slot_procs()[0])
 rows=[[pid,procs[pid][1],procs[pid][2],procs[pid][3],pid in signalled] for pid in sorted(procs)][:16]
 print(json.dumps({'generation':c.get('generation'),'found':found,'left':left,'processes':rows}),flush=True)
 `;

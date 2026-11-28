@@ -174,6 +174,10 @@ export interface AdbSlotDiagnostic {
   readonly release_state?: string;
 }
 
+/** C-848: what one reconcile pass reads once. */
+interface Pass {
+  running(machine: string): string[];
+}
 type Config = {
   adbSlots(machine: string): AdbSlotPolicy | undefined;
 };
@@ -380,14 +384,12 @@ export class AdbSlots {
         ))
     );
   }
-  private context(row: Row, action: "check" | "release") {
+  private context(row: Row, action: "check" | "release", pass: Pass) {
     const own =
       row.purpose === "run" && row.assignment_id && row.run_id
         ? `${row.assignment_id}.${row.run_id}`
         : undefined;
-    const keep = this.store.uow
-      .read((tx) => this.runningSessions(tx, row.project, row.machine))
-      .filter((s) => s !== own);
+    const keep = pass.running(row.machine).filter((s) => s !== own);
     return {
       action,
       project: row.project,
@@ -400,26 +402,33 @@ export class AdbSlots {
     };
   }
   /**
-   * C-848: `<Assignment>.<Run>` of this project's Runs on the machine that
-   * may still be executing (or are being launched); a slot cleanup never
-   * touches their processes.
+   * C-848: one reconcile pass of a project. `running(machine)` is
+   * `<Assignment>.<Run>` of the project's Runs on the machine that may still
+   * be executing (or are being launched); a slot cleanup never touches their
+   * processes. Read once per pass, not for every slot.
    */
-  private runningSessions(
-    tx: ReadRepositories,
-    project: string,
-    machine: string,
-  ): string[] {
-    const pending = new Set(
-      unfinishedBellAttempts(this.store.database, project).map((b) => b.run_id),
-    );
-    return tx.runs
-      .list(project)
-      .filter(
-        (r) =>
-          (runOccupiesSlot(r) || pending.has(r.id)) &&
-          tx.assignments.get(project, r.assignment_id)?.machine_id === machine,
-      )
-      .map((r) => `${r.assignment_id}.${r.id}`);
+  private pass(project: string): Pass {
+    let byMachine: Map<string, string[]> | undefined;
+    return {
+      running: (machine) => {
+        byMachine ??= this.store.uow.read((tx) => {
+          const pending = new Set(
+            unfinishedBellAttempts(this.store.database, project).map(
+              (b) => b.run_id,
+            ),
+          );
+          const out = new Map<string, string[]>();
+          for (const r of tx.runs.list(project)) {
+            if (!runOccupiesSlot(r) && !pending.has(r.id)) continue;
+            const m = tx.assignments.get(project, r.assignment_id)?.machine_id;
+            if (!m) continue;
+            out.set(m, [...(out.get(m) ?? []), `${r.assignment_id}.${r.id}`]);
+          }
+          return out;
+        });
+        return byMachine.get(machine) ?? [];
+      },
+    };
   }
   /**
    * C-848: what a release found still running, for its event: the reason,
@@ -489,12 +498,13 @@ export class AdbSlots {
           .all(project, at) as unknown as Row[]
       ).filter((row) => this.ended(tx, row));
     });
-    for (const row of due) await this.release(row, clock);
-    await this.sweep(project, clock);
+    const pass = this.pass(project);
+    for (const row of due) await this.release(row, clock, pass);
+    await this.sweep(project, clock, pass);
   }
-  private async release(row: Row, clock: () => string) {
+  private async release(row: Row, clock: () => string, pass: Pass) {
     const result = await this.probe?.(
-      this.context(row, "release"),
+      this.context(row, "release", pass),
       row.target ?? undefined,
     );
     this.store.uow.run((tx) => {
@@ -564,7 +574,7 @@ export class AdbSlots {
    * listening although no live Run owns them. Free slots are held by a sweep
    * row while checked so no Run gets one mid-sweep.
    */
-  private async sweep(project: string, clock: () => string) {
+  private async sweep(project: string, clock: () => string, pass: Pass) {
     const machines = this.store.uow.read((tx) =>
       tx.machines
         .list(project)
@@ -582,7 +592,7 @@ export class AdbSlots {
     for (const machine of machines) {
       this.sweeping.add(machine);
       try {
-        if (await this.sweepMachine(project, machine, clock))
+        if (await this.sweepMachine(project, machine, clock, pass))
           this.swept.set(machine, Date.parse(clock()));
       } finally {
         this.sweeping.delete(machine);
@@ -593,6 +603,7 @@ export class AdbSlots {
     project: string,
     machine: string,
     clock: () => string,
+    pass: Pass,
   ) {
     const p = this.config.adbSlots(machine);
     const probe = this.probe;
@@ -629,7 +640,7 @@ export class AdbSlots {
     });
     let reached = true;
     for (const row of held) {
-      const checked = await probe(this.context(row, "check"));
+      const checked = await probe(this.context(row, "check", pass));
       if (!checked) {
         // Unknown state: give the slot back and try the sweep again later.
         reached = false;
@@ -654,7 +665,7 @@ export class AdbSlots {
           ),
       );
       if (!checked.found) continue;
-      await this.release({ ...row, target: checked.target }, clock);
+      await this.release({ ...row, target: checked.target }, clock, pass);
     }
     const legacy =
       reached &&

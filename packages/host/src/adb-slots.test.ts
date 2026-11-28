@@ -1504,10 +1504,18 @@ test("C-848: an unparsable process list from the target is no proof of release",
 // Real script against stand-ins named like the real processes: a qemu whose
 // console hangs and that ignores SIGTERM, a qemu not listening at all, an adb
 // server that ignores host:kill. Each is double-forked so its parent is gone,
-// like an emulator an agent left behind with nohup.
+// like an emulator an agent left behind with nohup. The stand-in's code is a
+// file (no newline in its argv), and on macOS it runs the real interpreter of
+// the framework: /usr/bin/python3 and the framework's bin/python3 forward to
+// it and overwrite argv[0], so a stand-in started through them would not be
+// named like the process it stands in for.
 const ORPHAN = `import os,socket,sys
-argv0,mode,session=sys.argv[1],sys.argv[2],sys.argv[3]
-args=sys.argv[4:]
+argv0,mode,session,body=sys.argv[1:5]
+args=sys.argv[5:]
+exe=os.path.realpath(sys.executable)
+if sys.platform=='darwin':
+ app=os.path.join(sys.base_prefix,'Resources','Python.app','Contents','MacOS','Python')
+ if os.path.exists(app): exe=app
 s=None
 if 'listen' in mode:
  s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1); s.bind(('127.0.0.1',0)); s.listen(8); s.set_inheritable(True)
@@ -1516,7 +1524,9 @@ if os.fork(): os._exit(0)
 os.setsid()
 env={'PATH':'/usr/bin:/bin'}
 if session!='-': env['CARDIGAN_RESOURCE_SESSION']=session
-body="""import os,signal,socket,sys,time
+os.execve(exe,[argv0,'-I',body,mode,str(s.fileno() if s else -1)]+args,env)
+`;
+const ORPHAN_BODY = `import os,signal,socket,sys,time
 mode,fd=sys.argv[1],int(sys.argv[2])
 if 'stubborn' in mode: signal.signal(signal.SIGTERM,signal.SIG_IGN)
 print('ready',os.getpid(),flush=True)
@@ -1525,8 +1535,6 @@ if fd<0:
 s=socket.socket(fileno=fd); held=[]
 while True:
  c,_=s.accept(); held.append(c)
-"""
-os.execve('/usr/bin/python3',[argv0,'-c',body,mode,str(s.fileno() if s else -1)]+args,env)
 `;
 const orphans: number[] = [];
 afterEach(() => {
@@ -1543,16 +1551,18 @@ async function orphanStandIn(
   args: string[],
   session = "-",
 ): Promise<{ pid: number; port?: number }> {
+  const body = join(dir, "orphan-body.py");
+  await writeFile(body, ORPHAN_BODY);
   const child = spawn(
     "/usr/bin/python3",
-    ["-I", "-c", ORPHAN, argv0, mode, session, ...args],
+    ["-I", "-c", ORPHAN, argv0, mode, session, body, ...args],
     { stdio: ["ignore", "pipe", "inherit"] },
   );
   const pid = await new Promise<number>((resolve, reject) => {
     child.stdout?.once("data", (data: Buffer) =>
       resolve(Number(String(data).split(" ")[1])),
     );
-    setTimeout(() => reject(new Error("stand-in did not start")), 5000);
+    setTimeout(() => reject(new Error("stand-in did not start")), 10_000);
   });
   child.stdout?.destroy();
   orphans.push(pid);
@@ -1577,6 +1587,12 @@ const alive = (pid: number) => {
     return false;
   }
 };
+async function gone(pid: number) {
+  // Reaped by launchd / init shortly after it exits.
+  for (let i = 0; i < 50 && alive(pid); i++)
+    await new Promise((r) => setTimeout(r, 100));
+  return !alive(pid);
+}
 async function unused(): Promise<number> {
   // A port nothing listens on for a stand-in that never binds.
   for (;;) {
@@ -1584,10 +1600,62 @@ async function unused(): Promise<number> {
     if (!(await listening(port)) && !(await listening(port + 1))) return port;
   }
 }
+const realProbe = () =>
+  targetProbe(() => ({ mode: "local", dataDir: dir })).adb as AdbProbe;
+const slotContext = (adb_ports: number[], emulator_ports: number[]) => ({
+  project: "first",
+  machine: "local",
+  generation: "g-848",
+  adb_ports,
+  emulator_ports,
+});
 
-test("C-848: the real script stops by PID what the console and adb protocol left running, checks only this slot, and reports parents", async () => {
-  const probe = targetProbe(() => ({ mode: "local", dataDir: dir }));
-  const adb = probe.adb as AdbProbe;
+test("C-848: the real script sees the stand-ins as an emulator and an adb server, with their port and a parent that is gone", async () => {
+  const adb = realProbe();
+  const qemu = await orphanStandIn("qemu-system-x86_64", "listen", [
+    "-avd",
+    "X",
+    "-port",
+    "PORT",
+  ]);
+  const server = await orphanStandIn("adb", "listen", [
+    "-P",
+    "PORT",
+    "fork-server",
+    "server",
+  ]);
+  if (!qemu.port || !server.port) throw new Error("no port");
+  const listed = await adb({ ...slotContext([], []), action: "emulators" });
+  expect(listed?.emulators?.find((e) => e.pid === qemu.pid)).toMatchObject({
+    kind: "qemu",
+    port: qemu.port,
+  });
+  const checked = await adb({
+    ...slotContext([server.port], [qemu.port]),
+    action: "check",
+  });
+  expect(checked).toMatchObject({ found: 2, left: 2 });
+  expect(
+    checked?.processes
+      ?.map((p) => [p.pid, p.kind, p.port, p.signalled])
+      .sort((x, y) => Number(x[0]) - Number(y[0])),
+  ).toEqual(
+    [
+      [qemu.pid, "qemu", qemu.port, false],
+      [server.pid, "adb", server.port, false],
+    ].sort((x, y) => Number(x[0]) - Number(y[0])),
+  );
+  // The parent is gone: handed to launchd / init or a subreaper.
+  for (const p of checked?.processes ?? []) {
+    expect(p.ppid).toEqual(expect.any(Number));
+    expect(p.ppid).not.toBe(process.pid);
+  }
+  // A check only looks.
+  expect(alive(qemu.pid) && alive(server.pid)).toBe(true);
+}, 30_000);
+
+test("C-848: the real script stops by PID, inside the call limit, a qemu whose console hangs and ignores SIGTERM and an adb that ignores host:kill", async () => {
+  const adb = realProbe();
   const hung = await orphanStandIn("qemu-system-x86_64", "listen stubborn", [
     "-avd",
     "X",
@@ -1600,6 +1668,27 @@ test("C-848: the real script stops by PID what the console and adb protocol left
     "fork-server",
     "server",
   ]);
+  if (!hung.port || !server.port) throw new Error("no port");
+  const started = Date.now();
+  const released = await adb(
+    { ...slotContext([server.port], [hung.port]), action: "release" },
+    "local",
+  );
+  // runOnTarget kills the script at 10 s; it must answer well before.
+  expect(Date.now() - started).toBeLessThan(9_000);
+  expect(released).toMatchObject({ found: 2, left: 0 });
+  expect(released?.processes?.map((p) => p.pid).sort()).toEqual(
+    [hung.pid, server.pid].sort(),
+  );
+  expect(released?.processes?.every((p) => p.signalled)).toBe(true);
+  expect(await gone(hung.pid)).toBe(true);
+  expect(await gone(server.pid)).toBe(true);
+  expect(await listening(hung.port)).toBe(false);
+  expect(await listening(server.port)).toBe(false);
+}, 30_000);
+
+test("C-848: the real script finds and stops an emulator on the slot's console port that does not listen; another slot's is never touched", async () => {
+  const adb = realProbe();
   const quiet = await orphanStandIn("qemu-system-aarch64", "", [
     "-port",
     String(await unused()),
@@ -1608,52 +1697,26 @@ test("C-848: the real script stops by PID what the console and adb protocol left
     "-port",
     String(await unused()),
   ]);
-  if (!hung.port || !server.port || !quiet.port) throw new Error("no port");
-  const context = {
-    project: "first",
-    machine: "local",
-    generation: "g-848",
-    adb_ports: [server.port],
-    emulator_ports: [hung.port],
-  };
-  const checked = await adb({ ...context, action: "check" });
-  expect(checked).toMatchObject({ found: 2, left: 2 });
-  expect(checked?.processes?.map((p) => [p.pid, p.kind, p.port])).toEqual(
-    [
-      [hung.pid, "qemu", hung.port],
-      [server.pid, "adb", server.port],
-    ].sort((x, y) => Number(x[0]) - Number(y[0])),
-  );
-  // The parent is gone: it was handed to launchd / init or a subreaper.
-  for (const p of checked?.processes ?? [])
-    expect(p.ppid).not.toBe(process.pid);
-  expect(alive(hung.pid) && alive(server.pid)).toBe(true);
-  const released = await adb({ ...context, action: "release" }, "local");
-  expect(released).toMatchObject({ found: 2, left: 0 });
-  expect(released?.processes?.every((p) => p.signalled)).toBe(true);
-  expect(alive(hung.pid) || alive(server.pid)).toBe(false);
-  // An emulator on the slot's console port the port check cannot see.
-  const silent = { ...context, emulator_ports: [quiet.port], adb_ports: [] };
-  expect(await adb({ ...silent, action: "check" })).toMatchObject({
+  if (!quiet.port) throw new Error("no port");
+  const context = slotContext([], [quiet.port]);
+  expect(await adb({ ...context, action: "check" })).toMatchObject({
     found: 1,
     left: 1,
     processes: [expect.objectContaining({ pid: quiet.pid, kind: "qemu" })],
   });
-  expect(await adb({ ...silent, action: "release" }, "local")).toMatchObject({
+  expect(await adb({ ...context, action: "release" }, "local")).toMatchObject({
     found: 1,
     left: 0,
+    processes: [expect.objectContaining({ pid: quiet.pid, signalled: true })],
   });
-  expect(alive(quiet.pid)).toBe(false);
-  // Another slot's emulator was never touched.
+  expect(await gone(quiet.pid)).toBe(true);
   expect(alive(other.pid)).toBe(true);
-}, 40_000);
+}, 30_000);
 
-test("C-848: the real script closes an emulator naming the ended Run off its slot port, never one naming a running Run", async () => {
+test("C-848: the real script closes an emulator naming the ended Run off its slot port, never one naming a running Run, whose port keeps the slot held", async () => {
   // Sessions are read from the process environment, which Linux exposes.
   if (platform() !== "linux") return;
-  const probe = targetProbe(() => ({ mode: "local", dataDir: dir }));
-  const adb = probe.adb as AdbProbe;
-  const slotPort = await unused();
+  const adb = realProbe();
   const mine = await orphanStandIn(
     "qemu-system-x86_64",
     "",
@@ -1662,24 +1725,23 @@ test("C-848: the real script closes an emulator naming the ended Run off its slo
   );
   const running = await orphanStandIn(
     "qemu-system-x86_64",
-    "",
-    ["-port", String(slotPort)],
+    "listen",
+    ["-port", "PORT"],
     "A-2.R-2",
   );
+  if (!running.port) throw new Error("no port");
   const context = {
-    project: "first",
-    machine: "local",
-    generation: "g-848s",
-    adb_ports: [],
-    emulator_ports: [slotPort],
+    ...slotContext([], [running.port]),
     session: "A-1.R-1",
     keep_sessions: ["A-2.R-2"],
   };
   const released = await adb({ ...context, action: "release" }, "local");
-  expect(released).toMatchObject({ found: 1, left: 0 });
+  // The running Run's emulator still listens on the slot port: not free.
+  expect(released).toMatchObject({ found: 2, left: 1 });
   expect(released?.processes).toEqual([
     expect.objectContaining({ pid: mine.pid, kind: "qemu", signalled: true }),
   ]);
-  expect(alive(mine.pid)).toBe(false);
+  expect(await gone(mine.pid)).toBe(true);
   expect(alive(running.pid)).toBe(true);
+  expect(await listening(running.port)).toBe(true);
 }, 30_000);
