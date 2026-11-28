@@ -36,7 +36,7 @@ sudo systemctl enable --now sshd      # 启用 SSH；首次启动时生成主机
 
 - 按电源键会让设备休眠，接入后不要按；长期插电对电池有损耗，系统设置里有充电上限选项时可以开启。
 
-**Tailscale。** SteamOS 不自带 Tailscale。按 Tailscale 对 SteamOS 的说明把它装在不受系统更新影响的位置并登录 tailnet；每次系统更新后用 `tailscale status` 核对它仍在运行。控制主机经 Tailscale 地址连设备，不走局域网地址（C-709、C-828 实测：Deck 起初 Tailscale 地址的 22 端口不通、只有局域网能连，原因是下面的访问规则没放行，补上后 SSH 检查通过）。tailnet 访问规则要放行两个方向：
+**Tailscale。** SteamOS 不自带 Tailscale。按 Tailscale 对 SteamOS 的说明把它装在不受系统更新影响的位置并登录 tailnet；每次系统更新后用 `tailscale status` 核对它仍在运行。控制主机经 Tailscale 连设备（worker 地址填 `<设备>.<tailnet>.ts.net`），不走局域网地址；局域网直连只用来排除 sshd 本身的问题（C-709、C-828 实测：Deck 起初 Tailscale 的 22 端口不通、只有局域网能连，原因是下面的访问规则没放行，补上后 SSH 检查通过）。tailnet 访问规则要放行两个方向：
 
 - 控制主机 → 设备的 TCP 22（向导经 SSH 检查和启动 Run）；
 - 设备 → 控制主机 Serve 端口（MCP，写法见 [Linux 手册第 4 节](linux-worker.md#4-worker资源与-mcp)）。
@@ -124,14 +124,14 @@ Python 3 是系统自带的 `/usr/bin/python3`。Git 以体检报告和“工具
 
 | 项 | 结论 | 依据 |
 |---|---|---|
-| 控制主机怎么连 | 走 Tailscale，不走局域网地址；每台设备单独放行“控制主机 → 设备:22” | 起初 Tailscale 地址 22 端口不通，tailscaled 日志 `no rules matched`；补规则后 SSH 检查通过（C-709#46，见第 1 节） |
-| 运行账号 | 用初始化脚本建的专用账号 `cg_sensen_godot`，不改用 `deck` | 专用账号在 `-gpu host -no-window` 下实测用上了显卡（GPU 为 AMD VanGogh，RADV），没有必要退回 `deck`；专用账号不带 `deck` 的 sudo 密码、桌面会话和个人数据，与其它 worker 的隔离要求一致。原预案是专用账号用不了显卡时改用 `deck`（所有者 11-27 同意），实测没用上 |
-| 模拟器参数 | `-gpu host -feature -Vulkan -no-window` | 见下文“模拟器启动参数” |
-| 名额 | 机器 1、`android.emulator` 1 | 现场配置；同时跑 2 个见下文 |
+| 控制主机怎么连 | 走 Tailscale，不走局域网：worker 地址填 `<设备>.<tailnet>.ts.net`、端口 22，MCP 回连也走 tailnet；每台设备单独放行“控制主机 → 设备:22” | 起初 22 端口不通，是 tailnet 策略缺这条规则（tailscaled 日志 `Drop … no rules matched`），所有者补一条 accept 规则后通过。局域网直连只用来排除 sshd 本身的问题，不用于正式配置（见第 1 节） |
+| 运行账号 | 用初始化脚本建的专用账号 `cg_sensen_godot`（按项目隔离，UID/GID 2000），不用 `deck` | `deck` 在 wheel 组、能 sudo，家目录是所有者个人的；专用账号也能用上显卡：`/dev/kvm` 和 `/dev/dri/renderD128` 在 Deck 上都是 `rw-rw-rw-`，不用加 `render`、`video`、`kvm` 组，硬件渲染靠借 `deck` 的桌面（见第 4 步） |
+| 模拟器参数 | `-gpu host -no-window -no-snapshot-save -no-audio -no-boot-anim`，**不带 `-feature -Vulkan`** | Vulkan 必须开着，见下文“模拟器启动参数” |
+| 并发 | 当前配置 1 个，2 个未实测 | 现场 `run-capacity.yaml`，见下文 |
 
 ### 接入步骤
 
-1. **基础接入。** 按第 1～4 节完成准备、配对、初始化和体检报告，包括第 1 节的 tailnet 规则和 MagicDNS。资源上限按“名额 1、主要跑模拟器”配置，现场用的是：
+1. **基础接入。** 按第 1～4 节完成准备、配对、初始化和体检报告，包括第 1 节的 tailnet 规则和 MagicDNS drop-in。资源上限按“名额 1、主要跑模拟器”配置，现场用的是：
 
    ```ini
    # /etc/systemd/system/user-<UID>.slice.d/50-cardigan-worker.conf
@@ -152,18 +152,33 @@ Python 3 是系统自带的 `/usr/bin/python3`。Git 以体检报告和“工具
    | Android SDK（示例 `/home/cardigan-tools/android-sdk`） | `platform-tools`、`emulator`、`system-images;android-34;google_apis;x86_64`。这个 x86_64 镜像自带 ndk_translation，能跑 arm64 包 |
    | Godot | 项目需要时装，版本按项目要求 |
 
-   AVD 放在专用账号可写的目录（示例 `/home/cg_sensen_godot/.local/share/android/avd`），名字按项目自己的要求建。
-
-3. **核对账号能用 KVM 和显卡。**
+3. **专用账号的家目录。** 初始化建的家目录归 root，模拟器和 Gradle 要写的位置先用 sudo 建好，属主为专用账号：
 
    ```sh
-   ls -l /dev/kvm /dev/dri/renderD*   # 专用账号要能读写
-   id cg_sensen_godot
+   h=/home/cg_sensen_godot
+   sudo install -d -o cg_sensen_godot -g cg_sensen_godot -m 0700 "$h/.android" "$h/.gradle"
+   sudo install -o cg_sensen_godot -g cg_sensen_godot -m 0600 /dev/null "$h/.emulator_console_auth_token"
+   ls -l /dev/kvm /dev/dri/renderD128   # Deck 上为 rw-rw-rw-，不用给账号加组
    ```
 
-   不是所有人可读写时，由管理员决定是否把专用账号加入 `kvm`、`render` 组（初始化脚本不加组）。最终以第 6 步模拟器的 GLES 读数为准。
+   `ANDROID_USER_HOME`、`GRADLE_USER_HOME` 和 AVD 放到专用账号自己可写的 `~/.local/share` 下（第 5 步的 `env`），AVD 名字按项目要求建。设备权限不是所有人可读写时，由管理员决定是否把专用账号加入 `kvm`、`render` 组（初始化脚本不加组）。
 
-4. **控制主机：`runtime-workers.yaml`。** 先确认这台机器没有在跑的 Run，备份后在向导写入的绑定上补 `path` 和 `env`，其它字段保持向导生成的值（`root`、helper 都在 `/home/cardigan-workers/<项目>` 下）：
+4. **借桌面用显卡。** 专用账号要借 `deck` 的 X 桌面才能用硬件 GPU，不借就只能软件渲染：
+   - Deck 默认进桌面模式（以 `deck` 执行一次）：`steamosctl set-default-login-mode desktop`；
+   - `deck` 登录桌面时自动放行专用账号连这个显示。现场用自启动项 `~/.config/autostart/cardigan-worker-xhost.desktop`（`deck` 的家目录下）：
+
+     ```ini
+     [Desktop Entry]
+     Type=Application
+     Name=cardigan-worker-xhost
+     Exec=xhost +SI:localuser:cg_sensen_godot
+     ```
+
+   - 绑定 `env` 设 `DISPLAY: ":0"`（第 5 步）。
+
+   这条授权只给本机这一个账号，但它能连上 `deck` 的整个 X 显示（包括屏幕和输入）。切回游戏模式或桌面没登录时，Run 退回软件渲染。
+
+5. **控制主机：`runtime-workers.yaml`。** 先确认这台机器没有在跑的 Run，备份后在向导写入的绑定上补 `path` 和 `env`，其它字段保持向导生成的值（`root`、helper 都在 `/home/cardigan-workers/<项目>` 下）：
 
    ```yaml
    - project_id: sensen-godot
@@ -173,17 +188,19 @@ Python 3 是系统自带的 `/usr/bin/python3`。Git 以体检报告和“工具
      path: /home/cg_sensen_godot/.local/bin:/home/cardigan-tools/android-sdk/platform-tools:/home/cardigan-tools/android-sdk/emulator:/usr/bin:/bin
      env:
        ANDROID_HOME: /home/cardigan-tools/android-sdk
-       ANDROID_AVD_HOME: /home/cg_sensen_godot/.local/share/android/avd
+       ANDROID_USER_HOME: /home/cg_sensen_godot/.local/share/android      # 示例
+       ANDROID_AVD_HOME: /home/cg_sensen_godot/.local/share/android/avd   # 示例
+       GRADLE_USER_HOME: /home/cg_sensen_godot/.local/share/gradle        # 示例
        DISPLAY: ":0"
        SENSEN_EMULATOR_GPU: host
    ```
 
    - 不写 `ANDROID_ADB_SERVER_PORT`，adb 端口由下一步的 `adb_slots` 按 Run 分配（[Linux 手册第 1 节](linux-worker.md#1-控制主机预览与私有配置)）。
-   - `DISPLAY`、`SENSEN_EMULATOR_GPU` 是现场绑定的值；后者由 sensen 自己的模拟器脚本读取（见该项目 `tools/android/README.md`），Cardigan 不解释它。
+   - `SENSEN_EMULATOR_GPU=host` 由 sensen 自己的模拟器脚本读取，用来打开 `-gpu host`；Cardigan 不解释它。项目自定义变量不要用 `CARDIGAN_` 开头，这个前缀系统保留，绑定校验会拒绝。
    - 没拿到模拟器的 Run 不会得到 `ANDROID_AVD_HOME`，`path` 里的 `emulator` 目录也会被去掉（C-844），打包不受影响。
    - 改了 `env` 或 `path`，这台机器的工作树准备证据会变成“待重新验证”，下一次真实准备成功后自动续期；机器上没有在用的 Assignment 时，要显式指派一次（C-784）。
 
-5. **控制主机：`run-capacity.yaml`。** 现场配置：
+6. **控制主机：`run-capacity.yaml`。** 现场配置：
 
    ```yaml
    machines:
@@ -201,31 +218,31 @@ Python 3 是系统自带的 `/usr/bin/python3`。Git 以体检报告和“工具
 
    `emulator_port_base` 取 5586～5682 之间的偶数，规则见 [C-679 计划](plans/C-679.md)。配置生效后执行 `cardigan machine check steamdeck --project sensen-godot`，确认 `android.emulator` 已验证；再由所有者在机器详情点“开启远程派发”（C-846），挑项目没有活跃 Run 的时候开。
 
-6. **实测。** 派一个要求 `android.emulator`（或 `android.any`）的工作项到这台机器，核对：
+7. **实测。** 派一个要求 `android.emulator`（或 `android.any`）的工作项到这台机器，核对：
    - Run 环境里有本次槽位的 `ANDROID_ADB_SERVER_PORT`、`ANDROID_SERIAL`、`CARDIGAN_EMULATOR_PORT`，模拟器序列号是 `emulator-<5600 + 2×槽位>`；
    - 按下文参数起模拟器，能装包、截图；
-   - `adb shell dumpsys SurfaceFlinger | grep GLES` 显示 AMD，说明在用显卡；显示 SwiftShader 或 ANGLE 就是软件渲染，回到第 3 步查权限。
+   - 在用显卡：Godot 日志显示 Vulkan 1.3.0、Forward Mobile 渲染器，设备为 `Goldfish GFXStream (RADV VANGOGH)`。看不到 RADV 就是软件渲染，回到第 3、4 步查设备权限和借桌面。
 
    C-828 的参考读数：冷启动到 `boot_completed` 19.6 秒；x86_64 测试包稳定段 30 秒 60 fps、丢帧 0；qemu 约 180% CPU、RSS 约 4.5 GB；收尾时模拟器收到 TERM 正常退出。第一次真实 Run 成功后，工作树准备证据自动登记。
 
 ### 模拟器启动参数
 
-固定用 `-gpu host -feature -Vulkan -no-window`，端口和序列号用 Run 环境里槽位分配的值，不要写死：
+实测用的是 `-gpu host -no-window -no-snapshot-save -no-audio -no-boot-anim`：
 
-- `-gpu host`：用 Deck 的 AMD 核显。预研对比 cardigan-ci 那样的软件渲染（swangle）：游戏首屏 2.4 秒对 5.0 秒，30 秒帧数 22 对 6，卡顿 18% 对 100%，中位帧时间 18 ms 对 300 ms。
-- `-feature -Vulkan`：**必须带**，关掉模拟器给系统镜像的 Vulkan。不关时 Godot 会卡在 `Couldn't present to Vulkan queue (VkResult error 5)`，与 sensen `tools/android/README.md` 的说明一致。
-- `-no-window`：不开模拟器窗口。
+- **不要加 `-feature -Vulkan`。** Vulkan 必须开着：sensen 的 Godot 用 Mobile 渲染器，依赖 Vulkan。建卡时依据的早期笔记写过“不关 Vulkan，Godot 会卡在 `Couldn't present to Vulkan queue (VkResult error 5)`，必须关”，已被 C-828 实测推翻，以实测为准。
+- `-gpu host`：用 Deck 的 AMD 核显，前提是第 4 步借到了桌面。预研对比 cardigan-ci 那样的软件渲染（swangle）：游戏首屏 2.4 秒对 5.0 秒，30 秒帧数 22 对 6，卡顿 18% 对 100%，中位帧时间 18 ms 对 300 ms。
+- 端口和序列号用 Run 环境里槽位分配的值（`CARDIGAN_EMULATOR_PORT`、`ANDROID_SERIAL`、`ANDROID_ADB_SERVER_PORT`），不要写死，也不要手写 adb 的 `-P`。
 
-### 同时跑 2 个
+### 并发：当前配置 1 个，2 个未实测
 
-预研时手工同时跑 2 个模拟器（每个 4 GB 内存、4 核）稳定；C-828 收尾时的两次真实 Run 各自单独跑，现场名额保持 1。要改成 2 时：
+现场名额是 1，经派发同时跑 2 个模拟器没有在 Deck 上实测过。要试 2 个时：
 
 - `limit`、`max_limit`、`resources.android.emulator` 一起改成 2；adb 槽位数默认等于名额之和，不用另配；
-- `user-<UID>.slice` 的 `MemoryMax` 要容得下两个 qemu（各约 4.5 GB）再加构建；Deck 可用内存约 14.8 GB，低于 sensen 建议的 16 GB，改之前先实测一次。
+- 单个模拟器 qemu 约 180% CPU、RSS 约 4.5 GB，Deck 可用内存约 14.8 GB：`user-<UID>.slice` 的 `MemoryMax` 要容得下两个 qemu 再加构建，先实测再定。
 
 ### Deck 特有的注意事项
 
-- 系统更新后 `/etc`、`/home` 保留，但要在机器页“立即检查”，再核对 `tailscale status` 和第 1 节的 MagicDNS 修法仍生效。
+- 系统更新后 `/etc`、`/home` 保留，但要在机器页“立即检查”，再核对 `tailscale status`、第 1 节的 MagicDNS drop-in 和第 4 步的默认进桌面仍生效。
 - 一直插电、关掉自动休眠（第 1 节）；休眠或按电源键会让进行中的 Run 失联。
 - 内存与显存共用：模拟器、Godot 和构建一起跑时内存最紧，`MemoryMax` 不要按整机内存填。
 - Deck 的 AMD 核显不会登记成 GPU 能力；模拟器工作项靠 `android.emulator` 选机，不受影响。
@@ -234,5 +251,5 @@ Python 3 是系统自带的 `/usr/bin/python3`。Git 以体检报告和“工具
 
 - 后台自动升级 helper（Linux 手册“一次接入，之后由后台升级 helper”）要往 `/opt` 安装入口，SteamOS 上不可用；helper 升级按 Linux 手册的人工步骤，把 `/opt/cardigan` 换成 `/home/cardigan-release`。
 - 没有 AMD GPU 能力项；需要 GPU 的工作项不会自动选到这台设备。
-- 模拟器的硬件加速取决于 `/dev/kvm` 和显卡设备的权限，见第 3、5 节；Steam Deck 上 C-828 实测专用账号可用。
+- 模拟器的硬件加速取决于 `/dev/kvm`、显卡设备的权限，以及专用账号能否借到桌面（见第 5 节）；Steam Deck 上 C-828 实测专用账号可用。
 - 设备休眠、断电或系统更新重启期间，进行中的 Run 会失联，按普通失联流程处理。
