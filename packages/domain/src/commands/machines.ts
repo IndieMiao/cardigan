@@ -1,4 +1,8 @@
-import { capabilityAlternatives } from "../capability-alternatives.js";
+import {
+  alternativeOptionLabel,
+  capabilityAlternatives,
+  unresolvedAlternatives,
+} from "../capability-alternatives.js";
 import type { Actor, Machine, RoleWorktree, WorkItem } from "../entities.js";
 import {
   type MachinePlacement,
@@ -75,6 +79,47 @@ function reservedKeys(
       usable.every((o) => reserved.has(o))
     );
   });
+}
+
+/**
+ * C-850: for keys with an alternative that names none of its options yet
+ * (`android.any`), the most preferred option this machine could hand a new
+ * Run of this project now: verified, not reserved by another project, with
+ * room in its machine and project slots and, for a device type, an idle
+ * device (`idle_devices`). `null` when none is free; `undefined` when the
+ * keys have no such alternative.
+ */
+function freeAlternativeOption(
+  keys: readonly string[],
+  f: MachinePlacement | undefined,
+): string | null | undefined {
+  const [key] = unresolvedAlternatives(keys);
+  if (key === undefined) return undefined;
+  const verified = new Set(
+    f?.capabilities.filter((c) => c.available).map((c) => c.key),
+  );
+  const reserved = new Set(f?.reserved ?? []);
+  const room = (slot?: { limit: number; occupied: number }) =>
+    !slot || slot.occupied < slot.limit;
+  const idle = f?.idle_devices;
+  return (
+    (capabilityAlternatives(key) ?? []).find(
+      (option) =>
+        verified.has(option) &&
+        !reserved.has(option) &&
+        room(f?.resources?.get(option)) &&
+        room(f?.project_quota?.resources?.get(option)) &&
+        !(idle && Object.hasOwn(idle, option) && (idle[option] ?? 0) <= 0),
+    ) ?? null
+  );
+}
+
+/** Preference position of a free option; machines without one rank last. */
+function freeOptionRank(keys: readonly string[], option?: string | null) {
+  const [key] = unresolvedAlternatives(keys);
+  const options = key === undefined ? [] : (capabilityAlternatives(key) ?? []);
+  const rank = option ? options.indexOf(option) : -1;
+  return rank < 0 ? options.length : rank;
 }
 
 /** Registry admission also applies to explicit assignments; ranking and live evidence never do. */
@@ -249,6 +294,7 @@ export function selectMachine(
       return slot ? [{ key, ...slot }] : [];
     });
     const reserved = reservedKeys(keys, f);
+    const free_option = freeAlternativeOption(keys, f);
     const full = f
       ? [
           ...(f.occupied >= f.limit
@@ -286,6 +332,7 @@ export function selectMachine(
           )
         : null,
       ...(reserved.length ? { reserved } : {}),
+      ...(free_option !== undefined ? { free_option } : {}),
       ...(resources.length ? { resources } : {}),
       ...(project_resources.length ? { project_resources } : {}),
       ...(full.length ? { full } : {}),
@@ -299,6 +346,9 @@ export function selectMachine(
         Number((a.remaining_ratio ?? 0) > 0) ||
       // A reserved machine cannot even start the work when it frees up.
       Number(!!a.reserved) - Number(!!b.reserved) ||
+      // C-850: `android.any` goes where an idle device is, else a free emulator.
+      freeOptionRank(keys, a.free_option) -
+        freeOptionRank(keys, b.free_option) ||
       Number(b.control_host) - Number(a.control_host) ||
       Number(b.affinity) - Number(a.affinity) ||
       (b.remaining_ratio ?? 0) - (a.remaining_ratio ?? 0) ||
@@ -314,15 +364,18 @@ export function selectMachine(
   // Every eligible machine is full: the Run queues there; name the limits.
   const queued_on =
     (first.remaining_ratio ?? 1) <= 0 && first.full ? first.full : undefined;
+  const alternative = alternativePlacement(keys, first, candidates);
   return {
     machine_id: first.machine_id,
     audit: {
       candidates,
       excluded,
       ...(queued_on ? { queued_on } : {}),
+      ...(alternative ? { alternative } : {}),
       selection_order: [
         "has_capacity",
         "not_reserved",
+        "free_alternative",
         "control_host",
         "affinity",
         "remaining_ratio",
@@ -331,6 +384,30 @@ export function selectMachine(
       ],
     },
   };
+}
+
+/**
+ * C-850: which option the chosen machine can hand an `android.any` Run now
+ * and why it ranked first, for the `machine_selected` audit.
+ */
+function alternativePlacement(
+  keys: readonly string[],
+  first: { machine_id: string; free_option?: string | null },
+  candidates: readonly { machine_id: string; free_option?: string | null }[],
+) {
+  const [key] = unresolvedAlternatives(keys);
+  if (key === undefined) return undefined;
+  const option = first.free_option ?? null;
+  const preferred = (capabilityAlternatives(key) ?? [])[0];
+  const others = candidates.filter((c) => c.machine_id !== first.machine_id);
+  const reason = !option
+    ? "合格机器都没有空闲的真机或模拟器，按现有规则选机排队"
+    : option === preferred
+      ? `有空闲${alternativeOptionLabel(option)}，优先`
+      : others.some((c) => c.free_option === preferred)
+        ? `有空闲${alternativeOptionLabel(option)}；有空闲${alternativeOptionLabel(preferred ?? "")}的机器按名额或预约排在后面`
+        : `合格机器都没有空闲${alternativeOptionLabel(preferred ?? "")}，用空闲的${alternativeOptionLabel(option)}`;
+  return { key, option, reason };
 }
 
 export function validateMachine(machine: Machine): void {

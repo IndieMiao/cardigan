@@ -1914,6 +1914,146 @@ test("C-620 a head waiting on an occupied emulator does not hold back later godo
   ]);
 });
 
+test("C-850 android.any takes the device when both are free, leaving the emulator free, then the emulator; the dispatch event says which and why", async () => {
+  const resourceLimits = () =>
+    new Map([
+      ["android.emulator", 1],
+      ["android.device", 1],
+    ]);
+  const settings = { ...options, runLimit: () => 6, resourceLimits };
+  const actor = { kind: "system" as const, project_id: f.project };
+  beginMachineObservation(
+    f.store,
+    actor,
+    f.project,
+    "local",
+    "obs-1",
+    f.clock.now(),
+  );
+  completeMachineObservation(
+    f.store,
+    actor,
+    f.project,
+    "local",
+    "obs-1",
+    {
+      status: "passed",
+      checked_at: f.clock.now(),
+      blockers: [],
+      launch_enabled: true,
+    },
+    ["android.emulator", "android.device", "android.any"].map((key) => ({
+      key,
+      version: null,
+      verified_at: f.clock.now(),
+      evidence_ref: `machine-observation:obs-1#${key}`,
+    })),
+  );
+  const latest = (a: Assignment) =>
+    f
+      .state()
+      .runs.filter((r) => r.assignment_id === a.id)
+      .at(-1);
+  const dispatched = (r: Run | undefined) =>
+    f.store
+      .getUpdates({ project_id: f.project, card_id: cardOf(r) })
+      .events.find(
+        (e) =>
+          e.type === "run_dispatched" &&
+          (e.payload as { run_id?: string }).run_id === r?.id,
+      )?.payload;
+  const cardOf = (r: Run | undefined) => {
+    const a = f.state().assignments.find((x) => x.id === r?.assignment_id);
+    const card = f
+      .state()
+      .work_items.find((w) => w.id === a?.work_item_id)?.card_id;
+    if (!card) throw new Error("Missing card");
+    return card;
+  };
+  const slots = () =>
+    f.store.uow.read((tx) =>
+      runCapacitySnapshot(f.store, tx, resourceLimits).resourcesForMachine(
+        "local",
+      ),
+    );
+  requireCapabilities(target.item, ["android.any"]);
+  instruct();
+  await new Dispatcher(settings).tick();
+  const first = latest(target.assignment);
+  expect(first).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["android.any", "android.device"],
+  });
+  expect(slots().get("android.emulator")).toMatchObject({ occupied: 0 });
+  expect(dispatched(first)).toEqual({
+    run_id: first?.id,
+    assignment_id: target.assignment.id,
+    resource_keys: ["android.any", "android.device"],
+    resource_choices: [
+      {
+        key: "android.any",
+        option: "android.device",
+        states: [{ option: "android.device", state: "free" }],
+        reason: "真机空闲，优先用真机",
+      },
+    ],
+  });
+  // Only the emulator is free: the next android.any Run takes it at once.
+  const next = f.create();
+  requireCapabilities(next.item, ["android.any"]);
+  f.session(next.assignment);
+  f.advance(100);
+  f.apply((s, a, p) =>
+    issueInstruction(
+      s,
+      a,
+      { card_id: next.card.id, work_item_id: next.item.id, body: "work" },
+      p,
+    ),
+  );
+  await new Dispatcher(settings).tick();
+  const second = latest(next.assignment);
+  expect(second).toMatchObject({
+    status: "dispatched",
+    resource_keys: ["android.any", "android.emulator"],
+  });
+  expect(dispatched(second)).toMatchObject({
+    resource_keys: ["android.any", "android.emulator"],
+    resource_choices: [
+      {
+        option: "android.emulator",
+        states: [
+          { option: "android.device", state: "supported" },
+          { option: "android.emulator", state: "free" },
+        ],
+        reason: "真机没有空闲，用空闲的模拟器",
+      },
+    ],
+  });
+  // A concrete requirement records no choice.
+  const emulator = f.create();
+  requireCapabilities(emulator.item, ["godot"]);
+  f.session(emulator.assignment);
+  f.advance(100);
+  f.apply((s, a, p) =>
+    issueInstruction(
+      s,
+      a,
+      {
+        card_id: emulator.card.id,
+        work_item_id: emulator.item.id,
+        body: "work",
+      },
+      p,
+    ),
+  );
+  await new Dispatcher(settings).tick();
+  const plain = latest(emulator.assignment);
+  expect(plain?.status).toBe("dispatched");
+  expect(plain).not.toHaveProperty("resource_choices");
+  expect(dispatched(plain)).not.toHaveProperty("resource_choices");
+});
+
 test("C-815 android.any is dispatched on whichever of emulator and device has room and queues while both are full; android.emulator alone still waits", async () => {
   const resourceLimits = () =>
     new Map([

@@ -1277,3 +1277,188 @@ test.each([
     });
   },
 );
+
+/**
+ * C-850: `android.any` goes to a machine with an idle device first, then one
+ * with a free emulator; slots, project quota and reservations rank first and
+ * explicit `android.emulator` / `android.device` requirements are unchanged.
+ */
+test("C-850 android.any prefers a machine with an idle device, without overriding capacity, quota or reservations", () => {
+  const s = state();
+  const slots = (limit: number, occupied: number) => ({ limit, occupied });
+  const android: MachinePlacement = {
+    ...healthy,
+    capabilities: [
+      ...healthy.capabilities,
+      { key: "android.any", version: null, available: true },
+      { key: "android.emulator", version: null, available: true },
+      { key: "android.device", version: null, available: true },
+    ],
+    resources: new Map([["android.emulator", slots(1, 0)]]),
+  };
+  const at = (
+    capability: string,
+    local: Partial<MachinePlacement>,
+    worker: Partial<MachinePlacement>,
+  ): CommandState => ({
+    ...s,
+    machines: [machine(), remote],
+    roles: s.roles.map((r) => ({ ...r, required_capabilities: [capability] })),
+    read_machine_placement: () =>
+      placement([
+        // local has more room by every existing rule.
+        ["local", { ...android, limit: 10, occupied: 0, ...local }],
+        [remote.id, { ...android, limit: 4, occupied: 2, ...worker }],
+      ]),
+  });
+  const noDevice = { idle_devices: { "android.device": 0 } };
+  const oneDevice = { idle_devices: { "android.device": 1 } };
+
+  // Only the worker has an idle device; local only a free emulator.
+  const preferred = value(select(at("android.any", noDevice, oneDevice)));
+  expect(preferred.data.machine_id).toBe(remote.id);
+  expect(preferred.events.at(-1)?.payload).toMatchObject({
+    candidates: [
+      { machine_id: remote.id, free_option: "android.device" },
+      { machine_id: "local", free_option: "android.emulator" },
+    ],
+    alternative: {
+      key: "android.any",
+      option: "android.device",
+      reason: "有空闲真机，优先",
+    },
+    selection_order: [
+      "has_capacity",
+      "not_reserved",
+      "free_alternative",
+      "control_host",
+      "affinity",
+      "remaining_ratio",
+      "preference_rank",
+      "machine_id",
+    ],
+  });
+  // Both have an idle device: the existing rules decide.
+  expect(
+    value(select(at("android.any", oneDevice, oneDevice))).data.machine_id,
+  ).toBe("local");
+  // No idle device anywhere: a free emulator beats nothing free.
+  const emulator = value(
+    select(
+      at("android.any", noDevice, {
+        ...noDevice,
+        resources: new Map([["android.emulator", slots(1, 1)]]),
+      }),
+    ),
+  );
+  expect(emulator.data.machine_id).toBe("local");
+  expect(emulator.events.at(-1)?.payload).toMatchObject({
+    alternative: {
+      option: "android.emulator",
+      reason: "合格机器都没有空闲真机，用空闲的模拟器",
+    },
+  });
+  const flipped = value(
+    select(
+      at(
+        "android.any",
+        {
+          ...noDevice,
+          resources: new Map([["android.emulator", slots(1, 1)]]),
+        },
+        noDevice,
+      ),
+    ),
+  );
+  expect(flipped.data.machine_id).toBe(remote.id);
+  // Nothing free on either: existing rules, recorded as such.
+  const none = value(
+    select(
+      at(
+        "android.any",
+        {
+          ...noDevice,
+          resources: new Map([["android.emulator", slots(1, 1)]]),
+        },
+        {
+          ...noDevice,
+          resources: new Map([["android.emulator", slots(1, 1)]]),
+        },
+      ),
+    ),
+  );
+  expect(none.data.machine_id).toBe("local");
+  expect(none.events.at(-1)?.payload).toMatchObject({
+    candidates: [
+      { machine_id: "local", free_option: null },
+      { machine_id: remote.id, free_option: null },
+    ],
+    alternative: { option: null },
+  });
+
+  // The idle device's machine is at its run limit: capacity ranks first.
+  const full = value(
+    select(at("android.any", noDevice, { ...oneDevice, occupied: 4 })),
+  );
+  expect(full.data.machine_id).toBe("local");
+  expect(full.events.at(-1)?.payload).toMatchObject({
+    alternative: {
+      option: "android.emulator",
+      reason: "有空闲模拟器；有空闲真机的机器按名额或预约排在后面",
+    },
+  });
+  // Its project quota is full, or its device slot: the same.
+  for (const worker of [
+    { ...oneDevice, project_quota: { limit: slots(1, 1) } },
+    {
+      ...oneDevice,
+      project_quota: { resources: new Map([["android.device", slots(1, 1)]]) },
+    },
+    {
+      ...oneDevice,
+      resources: new Map([
+        ["android.emulator", slots(1, 1)],
+        ["android.device", slots(1, 1)],
+      ]),
+    },
+  ])
+    expect(
+      value(select(at("android.any", noDevice, worker))).data.machine_id,
+    ).toBe("local");
+  // Another project reserved its device: not idle for this project.
+  expect(
+    value(
+      select(
+        at("android.any", noDevice, {
+          ...oneDevice,
+          reserved: ["android.device"],
+        }),
+      ),
+    ).data.machine_id,
+  ).toBe("local");
+  // A device that is listed but not verified does not count.
+  expect(
+    value(
+      select(
+        at("android.any", noDevice, {
+          ...oneDevice,
+          capabilities: android.capabilities.filter(
+            (c) => c.key !== "android.device",
+          ),
+        }),
+      ),
+    ).data.machine_id,
+  ).toBe("local");
+
+  // Explicit requirements rank exactly as before: no alternative, no option.
+  for (const capability of ["android.emulator", "android.device"]) {
+    const explicit = value(select(at(capability, noDevice, oneDevice)));
+    expect(explicit.data.machine_id).toBe("local");
+    expect(explicit.events.at(-1)?.payload).not.toHaveProperty("alternative");
+    const payload = explicit.events.at(-1)?.payload as
+      | { candidates: Record<string, unknown>[] }
+      | undefined;
+    expect(payload?.candidates.length).toBe(2);
+    expect(payload?.candidates.some((c) => "free_option" in c)).toBe(false);
+  }
+});

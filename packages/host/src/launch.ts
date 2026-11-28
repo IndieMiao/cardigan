@@ -101,7 +101,7 @@ import {
   withPreparationQueue,
 } from "./preparation-queue.js";
 import type { ReadProjectQuota } from "./project-quotas.js";
-import { resolveResourceAlternatives } from "./resource-alternatives.js";
+import { chooseResourceAlternatives } from "./resource-alternatives.js";
 import type { MachineLeases, ResourceAccess } from "./resource-leases.js";
 import {
   RetainedWriterRefused,
@@ -410,8 +410,13 @@ async function launchWithClaim(
     tx: ReadRepositories,
     a: Assignment,
     project: string = input.project,
+  ) => chosenKeys(tx, a, project).keys;
+  const chosenKeys = (
+    tx: ReadRepositories,
+    a: Assignment,
+    project: string = input.project,
   ) =>
-    resolveResourceAlternatives(
+    chooseResourceAlternatives(
       host.store,
       project,
       a,
@@ -486,7 +491,7 @@ async function launchWithClaim(
       host.projectQuota,
     );
     const slots = capacity.resourcesForMachine(assignment.machine_id);
-    const keys = resolvedKeys(tx, assignment);
+    const { keys, choices } = chosenKeys(tx, assignment);
     const denied = host.leases?.blocked(
       input.project,
       assignment.machine_id,
@@ -565,10 +570,12 @@ async function launchWithClaim(
       resource_keys: keys,
       // C-736: host launches always claim the work item's resources.
       ...(keys.length ? { resource_reason: "主机启动按工作项占用" } : {}),
+      ...(choices.length ? { resource_choices: choices } : {}),
       ...(probe ? { provider_probe: probe } : {}),
     };
     delete cleared.queue_reason;
     if (!keys.length) delete cleared.resource_reason;
+    if (!choices.length) delete cleared.resource_choices;
     tx.runs.put(input.project, cleared);
     const at = clock.now();
     const attempt = {

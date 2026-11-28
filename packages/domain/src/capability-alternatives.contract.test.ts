@@ -4,6 +4,7 @@ import {
   ANDROID_ANY,
   alternativeCapabilities,
   capabilityAlternatives,
+  chooseCapabilityAlternatives,
   isAlternativeCapability,
   resolveCapabilityAlternatives,
   unresolvedAlternatives,
@@ -19,12 +20,12 @@ import { parseCapabilityRequirement } from "./machine-requirements.js";
 const EMULATOR = "android.emulator",
   DEVICE = "android.device";
 
-test("android.any is an ordinary capability key whose options are the emulator, then the device", () => {
+test("android.any is an ordinary capability key whose options are the device, then the emulator (C-850)", () => {
   expect(parseCapabilityRequirement(ANDROID_ANY)).toEqual({
     ok: true,
     value: { key: ANDROID_ANY },
   });
-  expect(capabilityAlternatives(ANDROID_ANY)).toEqual([EMULATOR, DEVICE]);
+  expect(capabilityAlternatives(ANDROID_ANY)).toEqual([DEVICE, EMULATOR]);
   expect(isAlternativeCapability(ANDROID_ANY)).toBe(true);
   for (const key of [EMULATOR, DEVICE, "godot", "toString", "__proto__"])
     expect(isAlternativeCapability(key)).toBe(false);
@@ -43,8 +44,8 @@ test("what an android.any Run might claim covers both options; explicit options 
   expect(withAllAlternatives([ANDROID_ANY, "godot"])).toEqual([
     ANDROID_ANY,
     "godot",
-    EMULATOR,
     DEVICE,
+    EMULATOR,
   ]);
   expect(withAllAlternatives([EMULATOR])).toEqual([EMULATOR]);
   expect(unresolvedAlternatives([ANDROID_ANY, "godot"])).toEqual([ANDROID_ANY]);
@@ -59,12 +60,23 @@ const states =
 
 test("resolution takes the first free option, else the first supported one to wait for", () => {
   const keys = [ANDROID_ANY, "godot"];
-  // Both free: the emulator (preference order).
+  // Both free: the device (C-850), so the emulator stays free.
   expect(
     resolveCapabilityAlternatives(
       keys,
       states({ [EMULATOR]: "free", [DEVICE]: "free" }),
     ),
+  ).toEqual([...keys, DEVICE]);
+  // Device busy, emulator free: the emulator, without waiting for a device.
+  expect(
+    resolveCapabilityAlternatives(
+      keys,
+      states({ [EMULATOR]: "free", [DEVICE]: "supported" }),
+    ),
+  ).toEqual([...keys, EMULATOR]);
+  // Emulator only on this machine.
+  expect(
+    resolveCapabilityAlternatives(keys, states({ [EMULATOR]: "free" })),
   ).toEqual([...keys, EMULATOR]);
   // Emulator busy, device free: the device.
   expect(
@@ -73,37 +85,90 @@ test("resolution takes the first free option, else the first supported one to wa
       states({ [EMULATOR]: "supported", [DEVICE]: "free" }),
     ),
   ).toEqual([...keys, DEVICE]);
-  // Device only on this machine.
-  expect(
-    resolveCapabilityAlternatives(keys, states({ [DEVICE]: "free" })),
-  ).toEqual([...keys, DEVICE]);
   // Both busy: wait for the first the machine has.
   expect(
     resolveCapabilityAlternatives(
       keys,
       states({ [EMULATOR]: "supported", [DEVICE]: "supported" }),
     ),
-  ).toEqual([...keys, EMULATOR]);
-  expect(
-    resolveCapabilityAlternatives(keys, states({ [DEVICE]: "supported" })),
   ).toEqual([...keys, DEVICE]);
+  expect(
+    resolveCapabilityAlternatives(keys, states({ [EMULATOR]: "supported" })),
+  ).toEqual([...keys, EMULATOR]);
   // Neither: the first option, which then waits like any missing resource.
   expect(resolveCapabilityAlternatives(keys, states({}))).toEqual([
     ...keys,
-    EMULATOR,
+    DEVICE,
   ]);
+});
+
+test("each pick is recorded with every option's state and a reason (C-850)", () => {
+  const keys = [ANDROID_ANY, "godot"];
+  expect(
+    chooseCapabilityAlternatives(
+      keys,
+      states({ [EMULATOR]: "free", [DEVICE]: "free" }),
+    ),
+  ).toEqual({
+    keys: [...keys, DEVICE],
+    choices: [
+      {
+        key: ANDROID_ANY,
+        option: DEVICE,
+        states: [{ option: DEVICE, state: "free" }],
+        reason: "真机空闲，优先用真机",
+      },
+    ],
+  });
+  expect(
+    chooseCapabilityAlternatives(
+      keys,
+      states({ [EMULATOR]: "free", [DEVICE]: "supported" }),
+    ).choices,
+  ).toEqual([
+    {
+      key: ANDROID_ANY,
+      option: EMULATOR,
+      states: [
+        { option: DEVICE, state: "supported" },
+        { option: EMULATOR, state: "free" },
+      ],
+      reason: "真机没有空闲，用空闲的模拟器",
+    },
+  ]);
+  expect(
+    chooseCapabilityAlternatives(keys, states({ [EMULATOR]: "free" }))
+      .choices[0]?.reason,
+  ).toBe("真机本机不具备，用空闲的模拟器");
+  expect(
+    chooseCapabilityAlternatives(
+      keys,
+      states({ [EMULATOR]: "supported", [DEVICE]: "supported" }),
+    ).choices[0],
+  ).toMatchObject({
+    option: DEVICE,
+    reason: "都没有空闲，先排队等真机，哪个先空出来用哪个",
+  });
+  expect(
+    chooseCapabilityAlternatives(keys, states({})).choices[0],
+  ).toMatchObject({ option: DEVICE, reason: "本机都不具备，按首选记为真机" });
+  // Nothing to choose: no record.
+  for (const explicit of [[EMULATOR], [ANDROID_ANY, EMULATOR], ["godot"]])
+    expect(
+      chooseCapabilityAlternatives(explicit, states({ [DEVICE]: "free" })),
+    ).toEqual({ keys: explicit, choices: [] });
 });
 
 test("resolution asks with the candidate keys, leaves explicit options and other keys alone, and is deterministic", () => {
   const asked: string[][] = [];
   const state = (candidate: readonly string[], option: string) => {
     asked.push([...candidate]);
-    return option === DEVICE ? "free" : "supported";
+    return option === EMULATOR ? "free" : "supported";
   };
   const once = resolveCapabilityAlternatives([ANDROID_ANY], state);
   expect(asked).toEqual([
-    [ANDROID_ANY, EMULATOR],
     [ANDROID_ANY, DEVICE],
+    [ANDROID_ANY, EMULATOR],
   ]);
   expect(resolveCapabilityAlternatives([ANDROID_ANY], state)).toEqual(once);
   asked.length = 0;

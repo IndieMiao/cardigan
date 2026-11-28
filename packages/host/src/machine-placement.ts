@@ -1,9 +1,17 @@
-import type { MachinePlacement, MachineResources } from "@cardigan/domain";
+import {
+  capabilityAlternatives,
+  isDeviceKey,
+  type MachinePlacement,
+  type MachineResources,
+  unresolvedAlternatives,
+} from "@cardigan/domain";
 import type { Harness, LaunchConfig } from "@cardigan/roles";
 import {
   readMachineObservationsInTransaction,
   type Store,
 } from "@cardigan/store";
+import { idleDevices } from "./device-leases.js";
+import { DEVICE_TYPES } from "./device-providers.js";
 import { observationFingerprint } from "./machine-capabilities.js";
 import { listMachineReservations } from "./machine-reservations.js";
 import { effectiveRunLimit, runCapacitySnapshot } from "./run-capacity.js";
@@ -63,6 +71,8 @@ export function configureMachinePlacement(
     const pendingHere = new Map<string, number>();
     // C-826: and the resource slots those owners will claim when they start.
     const pendingSlots = new Map<string, Map<string, number>>();
+    // C-850: and the devices they will take, per machine and device type.
+    const pendingDevices = new Map<string, Map<string, number>>();
     for (const [p, holding] of occupiedOwners) {
       const work = p === project ? draft : undefined;
       const runs = work?.runs ?? tx.runs.list(p);
@@ -103,8 +113,20 @@ export function configureMachinePlacement(
           slots = new Map();
           pendingSlots.set(a.machine_id, slots);
         }
-        for (const key of assignmentResourceKeys(tx, p, a))
-          slots.set(key, (slots.get(key) ?? 0) + 1);
+        const keys = assignmentResourceKeys(tx, p, a);
+        for (const key of keys) slots.set(key, (slots.get(key) ?? 0) + 1);
+        // C-850: a waiting `android.any` owner will take an idle device first.
+        for (const type of DEVICE_TYPES)
+          if (
+            keys.some((k) => isDeviceKey(type, k)) ||
+            unresolvedAlternatives(keys).some((k) =>
+              capabilityAlternatives(k)?.includes(type),
+            )
+          ) {
+            const devices = pendingDevices.get(a.machine_id) ?? new Map();
+            devices.set(type, (devices.get(type) ?? 0) + 1);
+            pendingDevices.set(a.machine_id, devices);
+          }
         if (p === project)
           pendingHere.set(
             a.machine_id,
@@ -156,19 +178,21 @@ export function configureMachinePlacement(
             worker && id !== "local"
               ? runtimeTargetBinding(worker).fingerprint
               : undefined;
+          const observed = readMachineObservationsInTransaction(
+            store,
+            project,
+            id,
+            now,
+            observationFingerprint(binding, machine),
+          );
+          const reserved = reservedByOthers(store, project, id, now);
           return [
             id,
             {
               ...(binding
                 ? workerCooldown(store, project, id, binding, now)
                 : {}),
-              ...readMachineObservationsInTransaction(
-                store,
-                project,
-                id,
-                now,
-                observationFingerprint(binding, machine),
-              ),
+              ...observed,
               ...(id !== "local" && upgradeHeld(store, project, id)
                 ? {
                     health: {
@@ -198,8 +222,26 @@ export function configureMachinePlacement(
                 resourcesForMachine(id),
                 pendingSlots.get(id),
               ),
-              ...reservedByOthers(store, project, id, now),
+              ...reserved,
               ...projectQuota(id),
+              idle_devices: Object.fromEntries(
+                DEVICE_TYPES.map((type) => [
+                  type,
+                  Math.max(
+                    0,
+                    idleDevices(
+                      store,
+                      project,
+                      id,
+                      type,
+                      observed.health?.available
+                        ? (observed.health.devices ?? [])
+                        : [],
+                      new Set(reserved.reserved),
+                    ) - (pendingDevices.get(id)?.get(type) ?? 0),
+                  ),
+                ]),
+              ),
             } satisfies MachinePlacement,
           ];
         }),
