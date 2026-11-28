@@ -7,7 +7,11 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-import type { AdbProbe, EmulatorProcess } from "./adb-slot-probe.js";
+import type {
+  AdbProbe,
+  AdbProbeResult,
+  EmulatorProcess,
+} from "./adb-slot-probe.js";
 import { DEVICE_PROVIDERS } from "./device-providers.js";
 import type { MachinePolicy } from "./resource-policy.js";
 
@@ -170,6 +174,10 @@ export interface AdbSlotDiagnostic {
   readonly release_state?: string;
 }
 
+/** C-848: what one reconcile pass reads once. */
+interface Pass {
+  running(machine: string): string[];
+}
 type Config = {
   adbSlots(machine: string): AdbSlotPolicy | undefined;
 };
@@ -376,7 +384,12 @@ export class AdbSlots {
         ))
     );
   }
-  private context(row: Row, action: "check" | "release") {
+  private context(row: Row, action: "check" | "release", pass: Pass) {
+    const own =
+      row.purpose === "run" && row.assignment_id && row.run_id
+        ? `${row.assignment_id}.${row.run_id}`
+        : undefined;
+    const keep = pass.running(row.machine).filter((s) => s !== own);
     return {
       action,
       project: row.project,
@@ -384,6 +397,74 @@ export class AdbSlots {
       generation: row.generation,
       adb_ports: [row.adb_port],
       emulator_ports: row.emulator_port ? [row.emulator_port] : [],
+      ...(own ? { session: own } : {}),
+      ...(keep.length ? { keep_sessions: keep } : {}),
+    };
+  }
+  /**
+   * C-848: one reconcile pass of a project. `running(machine)` is
+   * `<Assignment>.<Run>` of the project's Runs on the machine that may still
+   * be executing (or are being launched); a slot cleanup never touches their
+   * processes. Read once per pass, not for every slot.
+   */
+  private pass(project: string): Pass {
+    let byMachine: Map<string, string[]> | undefined;
+    return {
+      running: (machine) => {
+        byMachine ??= this.store.uow.read((tx) => {
+          const pending = new Set(
+            unfinishedBellAttempts(this.store.database, project).map(
+              (b) => b.run_id,
+            ),
+          );
+          const out = new Map<string, string[]>();
+          for (const r of tx.runs.list(project)) {
+            if (!runOccupiesSlot(r) && !pending.has(r.id)) continue;
+            const m = tx.assignments.get(project, r.assignment_id)?.machine_id;
+            if (!m) continue;
+            out.set(m, [...(out.get(m) ?? []), `${r.assignment_id}.${r.id}`]);
+          }
+          return out;
+        });
+        return byMachine.get(machine) ?? [];
+      },
+    };
+  }
+  /**
+   * C-848: what a release found still running, for its event: the reason,
+   * the slot's ports and the processes (PID, kind, port, parent). Only the
+   * project's own stream gets it; these ports are the ones its Run's launch
+   * environment already carried.
+   */
+  private cleanupDetail(
+    tx: ReadRepositories,
+    row: Row,
+    result: AdbProbeResult,
+  ): Record<string, string | number | boolean> {
+    if (!result.found) return {};
+    const run =
+      row.purpose === "run" && row.run_id
+        ? tx.runs.get(row.project, row.run_id)
+        : undefined;
+    const procs = result.processes ?? [];
+    return {
+      reason: row.purpose === "run" ? "run_ended" : "slot_free",
+      ...(run ? { run_status: run.status } : {}),
+      adb_port: row.adb_port,
+      ...(row.emulator_port ? { emulator_port: row.emulator_port } : {}),
+      ...(procs.length
+        ? {
+            pids: procs.map((p) => p.pid).join(","),
+            processes: procs
+              .map(
+                (p) =>
+                  `${p.kind}:${p.pid}${p.port === undefined ? "" : `:${p.port}`}${p.ppid === undefined ? "" : `:ppid=${p.ppid}`}${p.signalled ? ":signalled" : ""}`,
+              )
+              .join(","),
+            signalled: procs.filter((p) => p.signalled).length,
+            orphaned: procs.filter((p) => p.ppid === 1).length,
+          }
+        : {}),
     };
   }
   private readonly inflight = new Map<string, Promise<void>>();
@@ -417,12 +498,13 @@ export class AdbSlots {
           .all(project, at) as unknown as Row[]
       ).filter((row) => this.ended(tx, row));
     });
-    for (const row of due) await this.release(row, clock);
-    await this.sweep(project, clock);
+    const pass = this.pass(project);
+    for (const row of due) await this.release(row, clock, pass);
+    await this.sweep(project, clock, pass);
   }
-  private async release(row: Row, clock: () => string) {
+  private async release(row: Row, clock: () => string, pass: Pass) {
     const result = await this.probe?.(
-      this.context(row, "release"),
+      this.context(row, "release", pass),
       row.target ?? undefined,
     );
     this.store.uow.run((tx) => {
@@ -439,7 +521,11 @@ export class AdbSlots {
             "UPDATE machine_adb_slots SET released_at=?, release_state=NULL WHERE generation=? AND released_at IS NULL",
           )
           .run(at, row.generation);
-        const base = { machine: row.machine, slot: row.slot };
+        const base = {
+          machine: row.machine,
+          slot: row.slot,
+          ...this.cleanupDetail(tx, row, result),
+        };
         if (row.purpose === "run")
           this.event(tx, row.project, "machine_adb_slot_released", at, {
             ...base,
@@ -471,6 +557,15 @@ export class AdbSlots {
           machine: row.machine,
           slot: row.slot,
           reason,
+          ...(result?.processes?.length
+            ? {
+                pids: result.processes.map((p) => p.pid).join(","),
+                adb_port: row.adb_port,
+                ...(row.emulator_port
+                  ? { emulator_port: row.emulator_port }
+                  : {}),
+              }
+            : {}),
         });
     });
   }
@@ -479,7 +574,7 @@ export class AdbSlots {
    * listening although no live Run owns them. Free slots are held by a sweep
    * row while checked so no Run gets one mid-sweep.
    */
-  private async sweep(project: string, clock: () => string) {
+  private async sweep(project: string, clock: () => string, pass: Pass) {
     const machines = this.store.uow.read((tx) =>
       tx.machines
         .list(project)
@@ -497,7 +592,7 @@ export class AdbSlots {
     for (const machine of machines) {
       this.sweeping.add(machine);
       try {
-        if (await this.sweepMachine(project, machine, clock))
+        if (await this.sweepMachine(project, machine, clock, pass))
           this.swept.set(machine, Date.parse(clock()));
       } finally {
         this.sweeping.delete(machine);
@@ -508,6 +603,7 @@ export class AdbSlots {
     project: string,
     machine: string,
     clock: () => string,
+    pass: Pass,
   ) {
     const p = this.config.adbSlots(machine);
     const probe = this.probe;
@@ -544,7 +640,7 @@ export class AdbSlots {
     });
     let reached = true;
     for (const row of held) {
-      const checked = await probe(this.context(row, "check"));
+      const checked = await probe(this.context(row, "check", pass));
       if (!checked) {
         // Unknown state: give the slot back and try the sweep again later.
         reached = false;
@@ -569,7 +665,7 @@ export class AdbSlots {
           ),
       );
       if (!checked.found) continue;
-      await this.release({ ...row, target: checked.target }, clock);
+      await this.release({ ...row, target: checked.target }, clock, pass);
     }
     const legacy =
       reached &&
