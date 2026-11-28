@@ -15,7 +15,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
@@ -56,6 +56,9 @@ const BLOB_KB = setting("BLOB_KB", 860);
 const AHEAD = setting("AHEAD", 600);
 const HOST_REFS = setting("HOST_REFS", 3000);
 const RUNS = setting("RUNS", 3);
+/** Split the central pack into packs of this many MiB (0 keeps one pack). */
+const PACK_MB = setting("PACK_MB", 0);
+const UNFILTERED = process.env.CARDIGAN_LARGE_REPO_UNFILTERED === "1";
 
 const textBody = (path: string, revision: number) =>
   `# ${path} revision ${revision}\n${"var value = 1\n".repeat(40)}`;
@@ -132,6 +135,9 @@ function instrument(transport: CentralGitTransport) {
         depth++;
         const started = performance.now();
         try {
+          // Emulates the code before C-847: every changed path's content.
+          if (UNFILTERED && property === "fileDiffs")
+            return await value.apply(target, args.slice(0, 3));
           return await value.apply(target, args);
         } finally {
           depth--;
@@ -254,6 +260,23 @@ test.skipIf(!root)(
       meta = saved.meta;
     }
     const repository = central.repositoryPath(project);
+    if (PACK_MB > 0) {
+      // Many packs and no commit-graph, like a long-lived center.
+      await git(
+        repository,
+        "repack",
+        "-a",
+        "-d",
+        `--max-pack-size=${PACK_MB}m`,
+      );
+      await rm(join(repository, "objects", "info", "commit-graph"), {
+        force: true,
+      });
+      await rm(join(repository, "objects", "info", "commit-graphs"), {
+        recursive: true,
+        force: true,
+      });
+    }
     const size = await git(repository, "count-objects", "-vH");
     const commits = await git(repository, "rev-list", "--count", "main");
     const changed = (
@@ -298,13 +321,23 @@ test.skipIf(!root)(
         );
         const total = performance.now() - started;
         expect(verified.ok, JSON.stringify(verified)).toBe(true);
-        cases.push({ label, attempt, total_ms: total, ...counter.report() });
+        const report = counter.report();
+        cases.push({
+          label,
+          attempt,
+          total_ms: total,
+          fetch_tip_ms: report.methods.fetchBranchTip?.ms ?? 0,
+          file_diffs_ms: report.methods.fileDiffs?.ms ?? 0,
+          ...report,
+        });
       }
     const report = {
       repository: {
         commits: Number(commits),
         files_changed_since_assignment_base: changed,
         host_refs: HOST_REFS,
+        pack_mb: PACK_MB,
+        unfiltered_emulation: UNFILTERED,
         count_objects: size,
       },
       git: await git(work, "--version"),

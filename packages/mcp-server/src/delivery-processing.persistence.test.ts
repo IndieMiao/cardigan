@@ -25,6 +25,7 @@ let store: Store,
   project: ProjectId,
   verifications = 0,
   release: () => void = () => undefined,
+  hold = true,
   logs: LogEntry[] = [];
 const params = {
   idempotency_key: "slow-delivery",
@@ -37,6 +38,7 @@ const params = {
 beforeEach(async () => {
   store = Store.open({ dbPath: ":memory:" });
   verifications = 0;
+  hold = true;
   logs = [];
   const initial = fixture();
   project = initial.project_id;
@@ -60,9 +62,10 @@ beforeEach(async () => {
     deliveryVerifier: () => ({
       verify: async () => {
         verifications++;
-        await new Promise<void>((resolve) => {
-          release = resolve;
-        });
+        if (hold)
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
         return { ok: true, value: [] };
       },
     }),
@@ -149,7 +152,7 @@ test("different parameters under the same key are not joined to the running call
   first();
 });
 
-test("state changed while processing: the late settlement is refused, and the next attempt verifies afresh", async () => {
+test("state changed while processing: the failure is recorded, the same call gets the original error once, then verifies afresh", async () => {
   expect(await submit()).toMatchObject(processing);
   // The caller gave up and ended its Run while verification was running.
   const finished = await client.callTool({
@@ -164,26 +167,72 @@ test("state changed while processing: the late settlement is refused, and the ne
   expect(finished.isError).not.toBe(true);
   release();
   await vi.waitFor(() =>
-    expect(logs).toContainEqual(
-      expect.objectContaining({
-        tool: "submit_delivery",
-        method: "background",
-        code: "illegal_transition",
-      }),
+    expect(read().events).toContainEqual(
+      expect.objectContaining({ type: "delivery_rejected" }),
     ),
   );
+  expect(logs).toContainEqual(
+    expect.objectContaining({
+      tool: "submit_delivery",
+      method: "background",
+      code: "illegal_transition",
+    }),
+  );
   expect(read().deliveries).toEqual([]);
-  // A new Run repeats the call with the same key: the failure is not
-  // replayed, the delivery is verified again against current state.
+  expect(read().timeline.at(-1)?.body).toContain(
+    "幂等键 slow-delivery）在调用方停止等待后校验完成，未登记：illegal_transition",
+  );
   store.uow.run((tx) =>
     tx.runs.put(project, {
       ...makeRun(5, 1),
       trigger_event_id: `${"0".repeat(25)}5`,
     } as ReturnType<typeof makeRun>),
   );
+  // The same call again: the original error, without verifying again.
+  const replayed = await client.callTool({
+    name: "submit_delivery",
+    arguments: params,
+  });
+  expect(replayed.isError).toBe(true);
+  expect(replayed.structuredContent).toMatchObject({
+    error: {
+      code: "illegal_transition",
+      message: "Exactly one running Run is required",
+      details: { replayed: true, settled_at: now },
+    },
+  });
+  expect(verifications).toBe(1);
+  // Once received, the next attempt is evaluated against current state.
   const again = submit();
   await vi.waitFor(() => expect(verifications).toBe(2));
   release();
   expect(await again).toMatchObject({ status: "submitted", run_id: "R-5" });
   expect(read().deliveries).toHaveLength(1);
+  expect(
+    read().events.filter((e) => e.type === "delivery_rejection_claimed"),
+  ).toHaveLength(1);
+});
+
+test("a failure the caller received directly is not recorded or replayed; a stale supersedes says how to fix it", async () => {
+  hold = false;
+  const bad = { ...params, supersedes: "D-999" };
+  const first = await client.callTool({
+    name: "submit_delivery",
+    arguments: bad,
+  });
+  expect(first.structuredContent).toMatchObject({
+    error: {
+      code: "stale_target",
+      message: expect.stringContaining(
+        "D-999 不是本工作项的交付；当前没有有效的产出交付，去掉 supersedes",
+      ),
+    },
+  });
+  const again = await client.callTool({
+    name: "submit_delivery",
+    arguments: bad,
+  });
+  expect(again.structuredContent).toEqual(first.structuredContent);
+  expect(verifications).toBe(2);
+  expect(read().events.some((e) => e.type === "delivery_rejected")).toBe(false);
 });

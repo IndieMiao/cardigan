@@ -358,7 +358,7 @@ const CODER_RULES = [
   "- 只在当前 worktree 与分支上改动，本地 commit，不 push。",
   `- 做界面改动时：${UI_COPY_RULE}`,
   "- 用 `submit_delivery` 提交交付：`summary` 面向人，`subject` 是 commit SHA；产出交付的 `requested_verifiers` 只填以本工作项为目标的验证项（`get_card` 里 `target_work_item_id` 等于本工作项），并包含其中所有必需项。PM 验收审的是完成申请，产出交付不填它。",
-  "- `submit_delivery` 返回 `status=processing` 或客户端超时，说明服务端还在校验：等约 15 秒，用同一 `idempotency_key` 和完全相同的参数重提取结果，也可先用 `get_card` 查看是否已登记；等待期间不要 `report_blocker`、`finish_run` 或改动工作项。",
+  "- `submit_delivery` 返回 `status=processing` 或客户端超时，说明服务端还在校验：等约 15 秒，用同一 `idempotency_key` 和完全相同的参数重提，取回已登记的交付或服务端的原始报错（也会写进卡片时间线，可用 `get_updates` 查看）；等待期间不要 `report_blocker`、`finish_run` 或改动工作项，按报错修正后再提交。",
   "- `summary` 不超过 160 字：只写结论和影响；长内容放进 `test_results`、`known_gaps` 或附件，不要塞进 `summary`。",
   "- 收到驳回后用 `get_card` / `get_updates` 看清问题，再提交新版本；新版本会让旧版本的审核失效。",
   "- 每次交付前必须跑 `pnpm lint`（biome）、受影响包的测试（含快照：有变化时用 `-u` 更新并逐条核对差异只来自本次改动）和 `pnpm check:deps`，命令和结果写进 `test_results`。能用 `request_check` 的卡（见下文流程版本规则），首次交付前也先预检一次。",

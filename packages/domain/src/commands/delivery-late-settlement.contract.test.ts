@@ -7,7 +7,10 @@
  * - the caller changed state meanwhile (finished its Run, started another,
  *   reported a blocker): it is refused with a reason, never registered
  *   against the changed state, and a fresh submission in the current Run
- *   still works.
+ *   still works;
+ * - a failure nobody received is recorded and the same request fetches the
+ *   original error once with the same key;
+ * - a stale `supersedes` names its replacement and the fix.
  */
 import { beforeEach, expect, test } from "vitest";
 import { reportBlocker } from "./coordination.js";
@@ -18,6 +21,12 @@ import {
   submitDelivery,
   type VerifiedDelivery,
 } from "./delivery.js";
+import {
+  claimDeliveryRejection,
+  DELIVERY_REJECTION_CLAIM_MS,
+  DELIVERY_REJECTION_CLAIMED_EVENT,
+  recordDeliveryRejection,
+} from "./delivery-rejection.js";
 import { finishRun } from "./runtime.js";
 import {
   actor,
@@ -25,6 +34,7 @@ import {
   fixture,
   id,
   run as makeRun,
+  now,
   ports,
   subject,
   value,
@@ -132,4 +142,124 @@ test("changed after the timeout: the caller reported a blocker, so the late sett
   expect(item()?.status).toBe("blocked");
   expect(item()?.reported_blocker).toBeDefined();
   expect(state.deliveries).toEqual([]);
+});
+
+const system = { kind: "system" as const, project_id: fixture().project_id };
+const key = {
+  assignment_id: id("assignment", 1),
+  work_item_id: work,
+  idempotency_key: "slow-delivery",
+  request_fingerprint: "f".repeat(64),
+};
+const failure = {
+  code: "illegal_transition" as const,
+  message: "Exactly one running Run is required",
+};
+function record(error = failure) {
+  state = apply(
+    state,
+    value(recordDeliveryRejection(state, system, { ...key, error }, io)),
+  );
+}
+const claim = (k = key) => {
+  const effect = value(claimDeliveryRejection(state, system, k, io));
+  state = apply(state, effect);
+  return effect;
+};
+
+test("a failed result can be fetched with the same key: once, with the original error, and only for the same request", async () => {
+  record();
+  const entry = state.timeline.at(-1);
+  expect(entry).toMatchObject({ type: "system", work_item_id: work });
+  expect(entry?.body).toContain("幂等键 slow-delivery");
+  expect(entry?.body).toContain(`illegal_transition：${failure.message}`);
+  // A different request under the same key, or another Assignment, gets nothing.
+  for (const other of [
+    { ...key, request_fingerprint: "e".repeat(64) },
+    { ...key, idempotency_key: "other" },
+    { ...key, assignment_id: id("assignment", 2) },
+  ]) {
+    const none = claim(other);
+    expect(none.data).toBeUndefined();
+    expect(none.events).toEqual([]);
+  }
+  const claimed = claim();
+  expect(claimed.data).toEqual({ error: failure, settled_at: now });
+  expect(claimed.events.map((e) => e.type)).toEqual([
+    DELIVERY_REJECTION_CLAIMED_EVENT,
+  ]);
+  // Handed out once: the next call is evaluated against current state.
+  expect(claim().data).toBeUndefined();
+  // A later failure of the same request is handed out again.
+  record({ ...failure, message: "second" });
+  expect(claim().data?.error.message).toBe("second");
+});
+
+test("an unclaimed failure expires, and only the host records or claims failures", () => {
+  record();
+  const later = {
+    ...io,
+    clock: {
+      now: () =>
+        new Date(
+          Date.parse(now) + DELIVERY_REJECTION_CLAIM_MS + 1000,
+        ).toISOString(),
+    },
+  };
+  expect(
+    value(claimDeliveryRejection(state, system, key, later)).data,
+  ).toBeUndefined();
+  expect(
+    recordDeliveryRejection(state, actor(), { ...key, error: failure }, io),
+  ).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  expect(claimDeliveryRejection(state, actor(), key, io)).toMatchObject({
+    ok: false,
+    error: { code: "unauthorized" },
+  });
+  expect(
+    recordDeliveryRejection(
+      state,
+      system,
+      { ...key, work_item_id: id("work_item", 2), error: failure },
+      io,
+    ),
+  ).toMatchObject({ ok: false, error: { code: "validation_failed" } });
+});
+
+test("a supersedes made stale by a later code delivery names the delivery that replaced it and the fix", async () => {
+  state = apply(state, value(settle(await verify())));
+  const older = state.deliveries[0]?.id;
+  if (!older) throw new Error("Missing first delivery");
+  const second = { ...params, subject: { ...subject, value: "b".repeat(40) } };
+  const proof = value(
+    await prepareDelivery(state, actor(), second, {
+      verify: async () => ({ ok: true, value: [] }),
+    }),
+  );
+  state = apply(
+    state,
+    value(submitDelivery(state, actor(), second, proof, io)),
+  );
+  const newer = state.deliveries.find((d) => d.id !== older)?.id;
+  const third = {
+    ...params,
+    subject: { ...subject, value: "c".repeat(40) },
+    supersedes: older,
+  };
+  const late = submitDelivery(
+    state,
+    actor(),
+    third,
+    value(
+      await prepareDelivery(state, actor(), third, {
+        verify: async () => ({ ok: true, value: [] }),
+      }),
+    ),
+    io,
+  );
+  expect(late).toMatchObject({ ok: false, error: { code: "stale_target" } });
+  if (!late.ok)
+    expect(late.error.message).toContain(
+      `${older} 已被 ${newer} 作废，不再是当前有效的交付；去掉 supersedes，或改成当前有效的产出交付 ${newer}`,
+    );
 });
