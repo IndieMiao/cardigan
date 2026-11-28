@@ -18,7 +18,11 @@ import {
   unfinishedBellAttempts,
 } from "@cardigan/store";
 import { AdbSessionEnvironments } from "./adb-sessions.js";
-import { type AdbSlotAccess, AdbSlots } from "./adb-slots.js";
+import {
+  type AdbSlotAccess,
+  AdbSlots,
+  EMULATOR_RESOURCE,
+} from "./adb-slots.js";
 import { DeviceLeases } from "./device-leases.js";
 import {
   CAPACITY_WAIT_REASON,
@@ -121,7 +125,29 @@ export class MachineLeases {
     private readonly publicationProbe: ResourceProbe = probe,
   ) {
     this.clearances = new BindingClearances(store, probe);
-    this.adb = new AdbSlots(store, config, probe.adb);
+    // C-844: an unregistered emulator meets the machine's emulator slots and
+    // another project's reservation of the emulator (the owner closing it).
+    this.adb = new AdbSlots(
+      store,
+      config,
+      probe.adb,
+      (project, machine, now) => {
+        const reservation = this.active(machine, now).find(
+          (l) =>
+            l.resource === EMULATOR_RESOURCE &&
+            !l.run_id &&
+            l.project !== project &&
+            !!l.ends_at &&
+            l.ends_at > now &&
+            !l.deadline_recorded,
+        );
+        return {
+          limit:
+            config.resourcesForMachine(machine).get(EMULATOR_RESOURCE) ?? 0,
+          ...(reservation ? { reservation: reservation.generation } : {}),
+        };
+      },
+    );
     this.devices = new DeviceLeases(
       store,
       config,

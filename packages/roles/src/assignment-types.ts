@@ -164,6 +164,14 @@ export interface CompileAssignmentInput {
     readonly rules: readonly string[];
   };
   /**
+   * C-844: this Run holds no emulator. `ANDROID_AVD_HOME` points at the run
+   * directory (an existing directory without AVDs, so the emulator finds none
+   * and does not fall back to `~/.android/avd`), and `path` (the session's
+   * PATH, when the host knows it) is set without the SDK `emulator`
+   * directories. SDK, build-tools and adb stay as they are.
+   */
+  readonly no_emulator?: { readonly path?: string };
+  /**
    * C-726: usage notes of the capabilities this work item requires
    * (`requirements.capabilities`), merged for the Run's machine. Condensed
    * and quoted at the end of the Core Prompt; omitted or empty adds nothing.

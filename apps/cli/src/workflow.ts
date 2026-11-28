@@ -59,6 +59,7 @@ import {
   effectiveRunLimit,
   findMachineReservation,
   listMachineReservations,
+  listUnregisteredEmulators,
   loadMergeGateConfig,
   loadRunCapacityConfig,
   MachineLeases,
@@ -1336,6 +1337,15 @@ async function machineCommand(
               ? {
                   adb_slots: new AdbSlots(store, config, undefined).diagnostics(
                     m.id,
+                  ),
+                }
+              : {}),
+            // C-844: emulator processes no Run's slot covers (host operators only).
+            ...(sub === "show" && config.adbSlots(m.id)
+              ? {
+                  unregistered_emulators: listUnregisteredEmulators(
+                    store.database,
+                    { project: project_id, machine: m.id },
                   ),
                 }
               : {}),

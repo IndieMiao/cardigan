@@ -195,6 +195,8 @@ test("emulator only, device only and both: separate quotas, one Run per device, 
       env: { ANDROID_SERIAL: TABLET.id, CARDIGAN_DEVICE_SERIAL: TABLET.id },
       rules: [expect.stringContaining("--one-device")],
     },
+    // C-844: a device-only Run holds no emulator.
+    no_emulator: {},
   });
   // The only available tablet is taken (the unauthorized one is never
   // handed out): the next device Run waits, emulators are unaffected.
@@ -271,7 +273,7 @@ test("two Runs at once: the device appears only in the Run that holds it; the ot
   expect(otherLaunch.adb_slot).toMatchObject({ usb_off: true });
   expect(JSON.stringify(otherLaunch)).not.toContain(TABLET.id);
   // A Run with no slot on this machine gets no adb server at all.
-  expect(launch(l, godot.run)).toEqual({ adb_slot: null });
+  expect(launch(l, godot.run)).toEqual({ adb_slot: null, no_emulator: {} });
 });
 
 test("the database never lets two live leases hold one device", async () => {

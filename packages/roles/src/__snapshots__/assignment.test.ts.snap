@@ -59,6 +59,7 @@ exports[`snapshot: claude-code > command, arguments and files 1`] = `
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 需要 macOS 实跑证据时，用 \`request_macos_check({test_files, idempotency_key})\` 对本卡当前交付请求标准 macOS 检查：只传仓库内测试文件，主机取当前交付合入基线后的候选；结果（macOS 版本和架构、hc 版本、各文件通过／失败／跳过数、真实 hc 用例、退出码、步骤计时）自动回填到卡片时间线和附件。可在主机上限内重跑，不另建人工待办或一次性工作流。
 - 审核员把必需证据标为平台阻塞待补（\`get_card\` 验证项上的 \`pending_evidence\`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（\`upload_attachment\` 的 \`attach_to\` 指向新交付），旧版本证据不能沿用。
+- 环境里没有 \`CARDIGAN_EMULATOR_PORT\` 或 \`CARDIGAN_DEVICE_SERIAL\` 时，本次 Run 没拿到模拟器或设备：不能自己起模拟器（不改 \`ANDROID_AVD_HOME\`、不直接运行 \`emulator\` 或 \`qemu-system-*\`、不用 nohup、systemd-run 等放到后台），也不连接设备；打包需要的 SDK、build-tools 照常可用。需要设备时用 \`report_blocker\`（\`needs=role\`）请 PM 建要求 \`android.any\` 的工作项。系统巡检会停掉不属于任何租约的模拟器。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 - 发起 \`request_decision\` 时，\`question\` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 \`context\`。
@@ -344,6 +345,7 @@ exports[`snapshot: codex > command, arguments and files 1`] = `
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 需要 macOS 实跑证据时，用 \`request_macos_check({test_files, idempotency_key})\` 对本卡当前交付请求标准 macOS 检查：只传仓库内测试文件，主机取当前交付合入基线后的候选；结果（macOS 版本和架构、hc 版本、各文件通过／失败／跳过数、真实 hc 用例、退出码、步骤计时）自动回填到卡片时间线和附件。可在主机上限内重跑，不另建人工待办或一次性工作流。
 - 审核员把必需证据标为平台阻塞待补（\`get_card\` 验证项上的 \`pending_evidence\`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（\`upload_attachment\` 的 \`attach_to\` 指向新交付），旧版本证据不能沿用。
+- 环境里没有 \`CARDIGAN_EMULATOR_PORT\` 或 \`CARDIGAN_DEVICE_SERIAL\` 时，本次 Run 没拿到模拟器或设备：不能自己起模拟器（不改 \`ANDROID_AVD_HOME\`、不直接运行 \`emulator\` 或 \`qemu-system-*\`、不用 nohup、systemd-run 等放到后台），也不连接设备；打包需要的 SDK、build-tools 照常可用。需要设备时用 \`report_blocker\`（\`needs=role\`）请 PM 建要求 \`android.any\` 的工作项。系统巡检会停掉不属于任何租约的模拟器。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 - 发起 \`request_decision\` 时，\`question\` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 \`context\`。
@@ -550,6 +552,7 @@ exports[`snapshot: pi > command, arguments and files 1`] = `
 - 流程版本 ≤2 的旧卡不调用 \`request_check\`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 \`request_recheck\`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。
 - 需要 macOS 实跑证据时，用 \`request_macos_check({test_files, idempotency_key})\` 对本卡当前交付请求标准 macOS 检查：只传仓库内测试文件，主机取当前交付合入基线后的候选；结果（macOS 版本和架构、hc 版本、各文件通过／失败／跳过数、真实 hc 用例、退出码、步骤计时）自动回填到卡片时间线和附件。可在主机上限内重跑，不另建人工待办或一次性工作流。
 - 审核员把必需证据标为平台阻塞待补（\`get_card\` 验证项上的 \`pending_evidence\`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（\`upload_attachment\` 的 \`attach_to\` 指向新交付），旧版本证据不能沿用。
+- 环境里没有 \`CARDIGAN_EMULATOR_PORT\` 或 \`CARDIGAN_DEVICE_SERIAL\` 时，本次 Run 没拿到模拟器或设备：不能自己起模拟器（不改 \`ANDROID_AVD_HOME\`、不直接运行 \`emulator\` 或 \`qemu-system-*\`、不用 nohup、systemd-run 等放到后台），也不连接设备；打包需要的 SDK、build-tools 照常可用。需要设备时用 \`report_blocker\`（\`needs=role\`）请 PM 建要求 \`android.any\` 的工作项。系统巡检会停掉不属于任何租约的模拟器。
 - 被阻塞时用 \`report_blocker\`，需要人操作时用 \`request_human_action\`。
 - 只有凭据或外部账号这类前置操作（例如需要人提供或轮换凭据、在外部账号后台完成配置）不完成就不能合并时，\`request_human_action\` 才传 \`blocks_merge=true\` 并填写 \`prerequisite=credential|external_account\`；现场验证、实测、请人看看、知会或可以事后补做的，默认不挡合并，作为合并后的跟进项。
 - 发起 \`request_decision\` 时，\`question\` 就是拍板标题：第一句写成“请你确认：……”这样一句人话，说清要确认什么（例如“请你确认：卡片页的筛选改成下拉菜单”）；标题里不写卡片号、交付号、提交号等内部编号，也不写接口名，要引用的编号写进 \`context\`。

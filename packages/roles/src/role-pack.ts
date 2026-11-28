@@ -62,6 +62,10 @@ export const PM_PLANNING_RULES = [
 export const PM_ANDROID_ANY_RULE =
   "tester 和取证类（实测、录屏、截图取证）工作项需要安卓设备时，机器需求默认写 `android.any`（安卓设备任一，模拟器和真机哪个空闲用哪个）；只有明确需要模拟器（快照、冷启动、指定手机分辨率）才写 `android.emulator`，明确需要真机才写 `android.device`。已写具体类型的工作项不改。";
 
+/** C-844: a Run that holds no emulator or device starts none and connects to none. */
+export const NO_DEVICE_EMULATOR_RULE =
+  "环境里没有 `CARDIGAN_EMULATOR_PORT` 或 `CARDIGAN_DEVICE_SERIAL` 时，本次 Run 没拿到模拟器或设备：不能自己起模拟器（不改 `ANDROID_AVD_HOME`、不直接运行 `emulator` 或 `qemu-system-*`、不用 nohup、systemd-run 等放到后台），也不连接设备；打包需要的 SDK、build-tools 照常可用。需要设备时用 `report_blocker`（`needs=role`）请 PM 建要求 `android.any` 的工作项。系统巡检会停掉不属于任何租约的模拟器。";
+
 /** V12b: choose a card template before creating a card (p2v-12 plan §2.1). */
 export const PM_TEMPLATE_RULES = [
   "建卡前先用 `list_templates` 看本项目已有的模板，按卡片的工作类型（开发、通用、产出物、设计……）选最匹配的；找不到匹配的类型，优先看能不能复用现有模板（例如用 `artifact` 模板但换个产出角色），不要急着提新模板。",
@@ -372,6 +376,7 @@ const CODER_RULES = [
   "- 流程版本 ≤2 的旧卡不调用 `request_check`，沿用原交付、审核、完成申请与最终合并检查；版本 2 仅在上述条件满足时使用 `request_recheck`，版本 1 不使用作者重查。非 Git 交付或未启用合并闸门时沿用原规则。新版要求预检却缺工具或检查环境时报告阻塞，不降级跳过预检，不自行升级角色、Token 或卡片版本。",
   `- ${MACOS_CHECK_RULE}`,
   "- 审核员把必需证据标为平台阻塞待补（`get_card` 验证项上的 `pending_evidence`）时，不为它改代码；平台阻塞解除后系统会通知你补证，只补仍适用的证据，提交新交付并把证据附件绑定到新交付（`upload_attachment` 的 `attach_to` 指向新交付），旧版本证据不能沿用。",
+  `- ${NO_DEVICE_EMULATOR_RULE}`,
   "- 被阻塞时用 `report_blocker`，需要人操作时用 `request_human_action`。",
   `- ${HUMAN_ACTION_MERGE_RULE}`,
   `- ${DECISION_QUESTION_RULE}`,
@@ -693,6 +698,7 @@ const ROLE_BODIES: Record<
     "- 按验收标准实际运行和测试，不只读代码或听人转述；在 `issues[]` 的 description 或 proof 里写清跑了什么命令、在什么环境、结果如何，长输出放附件。",
     "- 证据分级：模拟、桩、截图和真机的结果分开写。拿不到真机或其它必需设备时，如实写未覆盖，不要声称测过。",
     "- 工作项要求 `android.any` 时，看 `ANDROID_SERIAL` 判断分到的是模拟器（`emulator-` 开头）还是真机；要快照、冷启动或手机分辨率却分到真机时，不拿真机结果替代，如实写未覆盖。",
+    `- ${NO_DEVICE_EMULATOR_RULE}`,
     "- 用 `submit_review` 提交结论：`target_sha` 必须等于交付的 `subject`；`issues[]` 每项写清 severity、must_fix、pre_existing，必要时给 proof。",
     `- ${MUST_FIX_IMPACT_RULE}`,
     `- ${FOLLOWUP_REVIEW_RULE}`,

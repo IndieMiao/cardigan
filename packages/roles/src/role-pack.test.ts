@@ -21,6 +21,7 @@ import {
   instructionsFor,
   isDefaultRoleId,
   MENTION_FIELD_RULE,
+  NO_DEVICE_EMULATOR_RULE,
   PM_DECISION_SUGGESTION_RULE,
   PM_HOST_MATTERS_RULE,
   PM_OFFICE_MENTION_FIRST_LINE_RULE,
@@ -1084,4 +1085,14 @@ test("C-753: PM learns when to declare an owner-required decision; other roles d
   for (const role of Object.keys(DEFAULT_ROLE_KINDS) as DefaultRoleId[])
     if (role !== "pm")
       expect(corePromptFor(role), role).not.toContain(PM_OWNER_REQUIRED_RULE);
+});
+
+test("C-844 coder, frontend_engineer and tester may not start an emulator or connect a device without one in the environment", () => {
+  for (const role of ["coder", "frontend_engineer", "tester"] as const)
+    expect(corePromptFor(role)).toContain(NO_DEVICE_EMULATOR_RULE);
+  expect(NO_DEVICE_EMULATOR_RULE).toContain("CARDIGAN_EMULATOR_PORT");
+  expect(NO_DEVICE_EMULATOR_RULE).toContain("CARDIGAN_DEVICE_SERIAL");
+  expect(NO_DEVICE_EMULATOR_RULE).toContain("android.any");
+  for (const role of ["pm", "reviewer", "host_ops"] as const)
+    expect(corePromptFor(role)).not.toContain(NO_DEVICE_EMULATOR_RULE);
 });

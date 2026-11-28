@@ -9,6 +9,7 @@ import type {
   ProjectId,
   Role,
   Run,
+  RunId,
   Runtime,
   RuntimeLaunch,
   RuntimeRef,
@@ -78,6 +79,7 @@ import {
   unfinishedBellAttempts,
   withdrawBellAttempt,
 } from "@cardigan/store";
+import { EMULATOR_RESOURCE } from "./adb-slots.js";
 import { loadAgentTestWorkers } from "./agent-test-config.js";
 import { agentToolsDirectoryFor } from "./agent-tools.js";
 import { launchCapabilityNotes } from "./capability-notes.js";
@@ -1219,11 +1221,14 @@ async function launch(
       // C-679: read the held slot back, so a retried launch of this Run keeps it.
       // C-813: likewise its devices; on a machine that hands out adb devices,
       // a slot Run holding none must not let its adb server claim USB.
-      ...launchDevices(
-        host.leases,
-        project,
-        assignment.machine_id,
-        input.run.id,
+      ...sessionPathFor(
+        launchDevices(
+          host.leases,
+          project,
+          assignment.machine_id,
+          input.run.id,
+        ),
+        execution.mode === "agent-ssh" ? execution.path : undefined,
       ),
       ...(capabilityNotes === undefined
         ? {}
@@ -1809,13 +1814,23 @@ export function statusLineContext(
  * C-813: the launch input for the Run's adb slot and held devices, read back
  * from the database so a retried launch keeps them.
  */
+/** C-844: a Run without an emulator also loses the SDK emulator directory from its worker PATH. */
+function sessionPathFor(
+  devices: ReturnType<typeof launchDevices>,
+  path: string | undefined,
+): ReturnType<typeof launchDevices> {
+  return devices.no_emulator && path !== undefined
+    ? { ...devices, no_emulator: { path } }
+    : devices;
+}
+
 export function launchDevices(
   leases: MachineLeases | undefined,
   project: string,
   machine: string,
   run: string,
   now: string = new Date().toISOString(),
-): Pick<CompileAssignmentInput, "adb_slot" | "device_session"> {
+): Pick<CompileAssignmentInput, "adb_slot" | "device_session" | "no_emulator"> {
   if (!leases) return {};
   // C-833: the session launched now carries the machine's adb environment.
   leases.sessions.record(project, machine, run, now);
@@ -1833,6 +1848,16 @@ export function launchDevices(
     !!slot &&
     !held.some((d) => policy?.resources.has(d.type)) &&
     leases.devices.adbTypes(machine).length > 0;
+  // C-844: only a Run holding an emulator may start one. On a slot machine
+  // that is the slot's emulator port; elsewhere the claimed resource key.
+  const emulator = policy
+    ? !!slot?.emulator_port
+    : leases.store.uow.read(
+        (tx) =>
+          tx.runs
+            .get(project, run as RunId)
+            ?.resource_keys?.includes(EMULATOR_RESOURCE) ?? false,
+      );
   return {
     ...(slot === undefined
       ? {}
@@ -1840,5 +1865,6 @@ export function launchDevices(
           adb_slot: slot && usbOff ? { ...slot, usb_off: true as const } : slot,
         }),
     ...(session ? { device_session: session } : {}),
+    ...(emulator ? {} : { no_emulator: {} }),
   };
 }
