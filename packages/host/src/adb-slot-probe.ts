@@ -10,10 +10,19 @@ import {
  * project account (never a project file). It only talks to loopback ports of
  * this slot: the adb server protocol's `host:kill` (what `adb -P <port>
  * kill-server` sends) and the emulator console's `kill` (authenticated with
- * the account's console token). No PID is read from disk or signalled.
+ * the account's console token). No PID is read from disk.
  *
  * argv[1] is the JSON context. `check` reports how many of the slot's ports
  * are listening; `release` closes them and reports what is left.
+ *
+ * C-848: both also count this account's emulator and adb processes of the
+ * slot (an emulator whose `-port` is the slot's console port or that names
+ * the Run, a listener on its ports), so an emulator the port check misses is
+ * still found. What the console or adb protocol did not close within a few
+ * seconds `release` stops by PID (SIGTERM, then SIGKILL), each checked
+ * against its start stamp first. Processes naming a Run in `keep_sessions`
+ * and the ports they hold are left alone. The processes are reported with
+ * their parent PID and whether they had to be signalled.
  *
  * C-833 `usb_off` (legacy fixed ports only): a server of this account that
  * lists a USB device (it claimed the device, typically because a session
@@ -189,34 +198,128 @@ def emu_procs():
     if os.stat('/proc/'+d).st_uid!=uid: continue
     with open('/proc/%s/cmdline'%d,'rb') as f: argv=[a.decode('utf-8','replace') for a in f.read(65536).split(b'\\0') if a]
     if not argv or not emu_kind(argv[0]): continue
-    with open('/proc/%s/stat'%d,'rb') as f: start=f.read(4096).rsplit(b')',1)[1].split()[19].decode()
+    with open('/proc/%s/stat'%d,'rb') as f: x=f.read(4096).rsplit(b')',1)[1].split()
+    start,ppid=x[19].decode(),int(x[1])
    except (OSError,IndexError,ValueError):
     continue
-   session=None
-   try:
-    with open('/proc/%s/environ'%d,'rb') as f:
-     for e in f.read(262144).split(b'\\0'):
-      if e.startswith(b'CARDIGAN_RESOURCE_SESSION='):
-       v=e[26:].decode('ascii','replace')
-       if SESSION.fullmatch(v): session=v
-   except OSError:
-    pass
-   out.append((int(d),start,argv,session))
+   out.append((int(d),start,argv,proc_session(int(d)),ppid))
   return out
  try:
-  o=subprocess.run(['/bin/ps','-ww','-U',str(uid),'-o','pid=,lstart=,command='],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
+  o=subprocess.run(['/bin/ps','-ww','-U',str(uid),'-o','pid=,ppid=,lstart=,command='],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
  except (OSError,subprocess.SubprocessError):
   return None
  for l in o.splitlines():
   x=l.split()
-  if len(x)<7 or not x[0].isdigit() or not emu_kind(x[6]): continue
-  out.append((int(x[0]),' '.join(x[1:6]),x[6:],None))
+  if len(x)<8 or not x[0].isdigit() or not x[1].isdigit() or not emu_kind(x[7]): continue
+  out.append((int(x[0]),' '.join(x[2:7]),x[7:],None,int(x[1])))
  return out
+def proc_session(pid):
+ try:
+  with open('/proc/%d/environ'%pid,'rb') as f:
+   for e in f.read(262144).split(b'\\0'):
+    if e.startswith(b'CARDIGAN_RESOURCE_SESSION='):
+     v=e[26:].decode('ascii','replace')
+     if SESSION.fullmatch(v): return v
+ except OSError:
+  pass
+def proc_info(pid):
+ # (start, argv, ppid, session) of this account's process, or None.
+ if sys.platform.startswith('linux'):
+  try:
+   if os.stat('/proc/%d'%pid).st_uid!=os.getuid(): return None
+   with open('/proc/%d/cmdline'%pid,'rb') as f: argv=[a.decode('utf-8','replace') for a in f.read(65536).split(b'\\0') if a]
+   with open('/proc/%d/stat'%pid,'rb') as f: x=f.read(4096).rsplit(b')',1)[1].split()
+   return (x[19].decode(),argv,int(x[1]),proc_session(pid))
+  except (OSError,IndexError,ValueError):
+   return None
+ try:
+  x=subprocess.run(['/bin/ps','-ww','-o','uid=,ppid=,lstart=,command=','-p',str(pid)],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout.split()
+ except (OSError,subprocess.SubprocessError):
+  return None
+ if len(x)<8 or not x[0].isdigit() or int(x[0])!=os.getuid() or not x[1].isdigit(): return None
+ return (' '.join(x[2:7]),x[7:],int(x[1]),None)
+def listeners(p):
+ # PIDs of this account's processes listening on loopback port p.
+ uid=os.getuid(); out=set()
+ if sys.platform.startswith('linux'):
+  inodes=set()
+  for f in ('/proc/net/tcp','/proc/net/tcp6'):
+   try:
+    with open(f) as h: rows=h.read().splitlines()[1:]
+   except OSError:
+    continue
+   for r in rows:
+    x=r.split()
+    try:
+     if len(x)>9 and x[3]=='0A' and int(x[1].rsplit(':',1)[1],16)==p and int(x[7])==uid: inodes.add('socket:[%s]'%x[9])
+    except ValueError:
+     pass
+  if not inodes: return out
+  for d in os.listdir('/proc'):
+   if not d.isdigit() or int(d)==os.getpid(): continue
+   try:
+    if os.stat('/proc/'+d).st_uid!=uid: continue
+    for fd in os.listdir('/proc/%s/fd'%d):
+     if os.readlink('/proc/%s/fd/%s'%(d,fd)) in inodes:
+      out.add(int(d)); break
+   except OSError:
+    continue
+  return out
+ try:
+  o=subprocess.run(['/usr/sbin/lsof','-nP','-a','-u',str(uid),'-iTCP:%d'%p,'-sTCP:LISTEN','-t'],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
+ except (OSError,subprocess.SubprocessError):
+  return out
+ return {int(v) for v in o.split() if v.isdigit() and int(v)!=os.getpid()}
+def str_list(v):
+ return [x for x in v if isinstance(x,str) and SESSION.fullmatch(x)] if isinstance(v,list) else []
+SESS=str_list([c.get('session')])
+KEEP=set(str_list(c.get('keep_sessions')))-set(SESS)
+def slot_procs():
+ # C-848: this account's emulator and adb processes holding this slot: an
+ # emulator on one of its console ports or naming the Run (Linux), and any
+ # emulator or adb process listening on its ports. A process naming another
+ # Run that still runs is never one of them, nor are the ports it holds.
+ # ({pid: (start,kind,port,ppid)}, kept ports)
+ found={}; kept=set(); keep_ports=set()
+ listed=emu_procs()
+ # No process list: no answer, so the host retries instead of a false release.
+ if listed is None: sys.exit(0)
+ for pid,start,argv,session,ppid in listed:
+  port=emu_port(argv)
+  if session in KEEP:
+   kept.add(pid)
+   if port is not None: keep_ports.update((port,port+1))
+   continue
+  if (port is not None and port in emu) or (session is not None and session in SESS):
+   found[pid]=(start,emu_kind(argv[0]),port,ppid)
+ for p in ports:
+  for pid in listeners(p):
+   if pid in kept:
+    keep_ports.add(p); continue
+   if pid in found: continue
+   i=proc_info(pid)
+   if not i or not i[1]: continue
+   start,argv,ppid,session=i
+   if session in KEEP:
+    keep_ports.add(p); continue
+   k=emu_kind(argv[0]) or ('adb' if os.path.basename(argv[0])=='adb' else None)
+   if k: found[pid]=(start,k,p,ppid)
+ for pid in [pid for pid in found if found[pid][2] in keep_ports]: found.pop(pid)
+ return found,keep_ports
+def occupied(procs,keep):
+ # Listening ports plus processes of the slot (a qemu the port check missed).
+ busy={p for p in ports if p not in keep and up(p)}|{v[2] for v in procs.values() if v[2] in ports}
+ return len(busy)+sum(1 for v in procs.values() if v[2] not in ports)
+def same(pid,start):
+ i=proc_info(pid)
+ return bool(i) and i[0]==start
+def gone(procs):
+ return [pid for pid in procs if not same(pid,procs[pid][0])]
 def emulators():
  found=emu_procs()
  if found is None:
   return
- rows=[[p,s,emu_kind(a[0]),emu_port(a),n] for p,s,a,n in found][:16]
+ rows=[[p,s,emu_kind(a[0]),emu_port(a),n,pp] for p,s,a,n,pp in found][:16]
  print(json.dumps(dict(generation=c.get('generation'),found=len(rows),left=0,emulators=rows)),flush=True)
 def emulator_stop():
  want=set()
@@ -224,7 +327,7 @@ def emulator_stop():
   if isinstance(x,list) and len(x)==2 and isinstance(x[0],int) and isinstance(x[1],str): want.add((x[0],x[1]))
  def live():
   f=emu_procs()
-  return None if f is None else [p for p,s,a,n in f if (p,s) in want]
+  return None if f is None else [p for p,s,a,n,pp in f if (p,s) in want]
  hit=live()
  if hit is None: return
  left=hit
@@ -246,16 +349,43 @@ if c.get('action')=='usb_off':
  usb_off(); sys.exit(0)
 if c.get('action') in ('emulators','emulator_stop'):
  (emulators if c['action']=='emulators' else emulator_stop)(); sys.exit(0)
-found=sum(1 for p in ports if up(p))
+t0=time.monotonic()
+procs,keep=slot_procs()
+open_ports=[p for p in ports if p not in keep]
+found=occupied(procs,keep)
+signalled=[]
 if c.get('action')=='release' and found:
  for p in emu:
-  if up(p): emu_kill(p)
+  if p not in keep and up(p): emu_kill(p)
  for p in adb:
-  if up(p): adb_kill(p)
- end=time.monotonic()+float(c.get('wait',4))
- while any(up(p) for p in ports) and time.monotonic()<end: time.sleep(0.2)
-left=sum(1 for p in ports if up(p))
-print(json.dumps({'generation':c.get('generation'),'found':found,'left':left}),flush=True)
+  if p not in keep and up(p): adb_kill(p)
+ end=t0+float(c.get('wait',3))
+ while (any(up(p) for p in open_ports) or len(gone(procs))<len(procs)) and time.monotonic()<end: time.sleep(0.2)
+ # C-848: what the console and adb protocol did not close (no answer under
+ # load, a token in another HOME, an emulator off its console) is stopped
+ # by PID, checked against its start stamp so a reused PID is never hit.
+ rest=dict(procs)
+ more,keep2=slot_procs()
+ rest.update(more); keep|=keep2
+ for pid in gone(rest): rest.pop(pid,None)
+ procs.update(rest)
+ for sig,wait in ((signal.SIGTERM,2.5),(signal.SIGKILL,1.0)):
+  if not rest: break
+  for pid in list(rest):
+   try:
+    os.kill(pid,sig)
+   except OSError:
+    pass
+   if pid not in signalled: signalled.append(pid)
+  end=time.monotonic()+wait
+  while rest and time.monotonic()<end:
+   time.sleep(0.2)
+   for pid in gone(rest): rest.pop(pid,None)
+ end=time.monotonic()+1.0
+ while any(up(p) for p in open_ports if p not in keep) and time.monotonic()<end: time.sleep(0.2)
+left=occupied(*slot_procs()) if c.get('action')=='release' else found
+rows=[[pid,procs[pid][1],procs[pid][2],procs[pid][3],pid in signalled] for pid in sorted(procs)][:16]
+print(json.dumps({'generation':c.get('generation'),'found':found,'left':left,'processes':rows}),flush=True)
 `;
 
 export type AdbProbeContext = {
@@ -273,6 +403,24 @@ export type AdbProbeContext = {
   adb_ports: readonly number[];
   emulator_ports: readonly number[];
   pids?: readonly (readonly [number, string])[];
+  /**
+   * C-848 `check` / `release` of a Run's slot: its `<Assignment>.<Run>`, so
+   * an emulator naming the Run (Linux) is closed even off the slot's ports.
+   */
+  session?: string;
+  /** C-848: Runs still running on the machine; their processes and ports are never touched. */
+  keep_sessions?: readonly string[];
+};
+/** C-848: a process of the slot the check or release found (at most 16). */
+export type SlotProcess = {
+  readonly pid: number;
+  readonly kind: "qemu" | "launcher" | "adb";
+  /** Its console port (emulators) or the slot port it listens on. */
+  readonly port?: number;
+  /** Parent PID; 1 means it was left to launchd / init. */
+  readonly ppid?: number;
+  /** Stopped by signal because the console or adb protocol did not close it. */
+  readonly signalled: boolean;
 };
 /** C-844: one emulator process of the project account on the worker. */
 export type EmulatorProcess = {
@@ -284,6 +432,8 @@ export type EmulatorProcess = {
   readonly port?: number;
   /** `CARDIGAN_RESOURCE_SESSION` (`<Assignment>.<Run>`) in its environment (Linux). */
   readonly session?: string;
+  /** C-848: parent PID. */
+  readonly ppid?: number;
 };
 export type AdbProbeResult = {
   target: string;
@@ -296,6 +446,8 @@ export type AdbProbeResult = {
   missing?: number;
   /** emulators: the processes found. */
   emulators?: readonly EmulatorProcess[];
+  /** check / release: the slot's processes found. */
+  processes?: readonly SlotProcess[];
 };
 /** Undefined means the target or its answer could not be established. */
 export type AdbProbe = (
@@ -327,12 +479,46 @@ const count = (v: unknown) =>
   typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
 
 const SESSION = /^A-[0-9]{1,12}\.R-[0-9]{1,12}$/u;
+const pid = (v: unknown) =>
+  typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : undefined;
+const port = (v: unknown) =>
+  typeof v === "number" && Number.isSafeInteger(v) && v > 0 && v <= 65535
+    ? v
+    : undefined;
+function slotProcesses(value: unknown): SlotProcess[] | undefined {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16) return undefined;
+  const rows: SlotProcess[] = [];
+  for (const v of value) {
+    if (!Array.isArray(v) || v.length !== 5) return undefined;
+    const [id, kind, p, parent, signalled] = v as unknown[];
+    if (
+      pid(id) === undefined ||
+      (kind !== "qemu" && kind !== "launcher" && kind !== "adb") ||
+      (p !== null && port(p) === undefined) ||
+      (parent !== null &&
+        (typeof parent !== "number" ||
+          !Number.isSafeInteger(parent) ||
+          parent < 0)) ||
+      typeof signalled !== "boolean"
+    )
+      return undefined;
+    rows.push({
+      pid: id as number,
+      kind,
+      ...(p === null ? {} : { port: p as number }),
+      ...(parent === null ? {} : { ppid: parent as number }),
+      signalled,
+    });
+  }
+  return rows;
+}
 function emulatorRows(value: unknown): EmulatorProcess[] | undefined {
   if (!Array.isArray(value) || value.length > 16) return undefined;
   const rows: EmulatorProcess[] = [];
   for (const v of value) {
-    if (!Array.isArray(v) || v.length !== 5) return undefined;
-    const [pid, started, kind, port, session] = v as unknown[];
+    if (!Array.isArray(v) || v.length !== 6) return undefined;
+    const [pid, started, kind, port, session, ppid] = v as unknown[];
     if (
       typeof pid !== "number" ||
       !Number.isSafeInteger(pid) ||
@@ -346,7 +532,9 @@ function emulatorRows(value: unknown): EmulatorProcess[] | undefined {
           port <= 0 ||
           port > 65535)) ||
       (session !== null &&
-        (typeof session !== "string" || !SESSION.test(session)))
+        (typeof session !== "string" || !SESSION.test(session))) ||
+      (ppid !== null &&
+        (typeof ppid !== "number" || !Number.isSafeInteger(ppid) || ppid < 0))
     )
       return undefined;
     rows.push({
@@ -355,6 +543,7 @@ function emulatorRows(value: unknown): EmulatorProcess[] | undefined {
       kind,
       ...(port === null ? {} : { port }),
       ...(session === null ? {} : { session }),
+      ...(ppid === null ? {} : { ppid }),
     });
   }
   return rows;
@@ -389,6 +578,16 @@ export function adbTargetProbe(
         return emulators
           ? { target: resolved.target, found, left, emulators }
           : undefined;
+      }
+      if (context.action === "check" || context.action === "release") {
+        const processes = slotProcesses(row.processes);
+        if (!processes) return undefined;
+        return {
+          target: resolved.target,
+          found,
+          left,
+          ...(processes.length ? { processes } : {}),
+        };
       }
       if (context.action !== "usb_off")
         return { target: resolved.target, found, left };

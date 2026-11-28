@@ -7,7 +7,11 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-import type { AdbProbe, EmulatorProcess } from "./adb-slot-probe.js";
+import type {
+  AdbProbe,
+  AdbProbeResult,
+  EmulatorProcess,
+} from "./adb-slot-probe.js";
 import { DEVICE_PROVIDERS } from "./device-providers.js";
 import type { MachinePolicy } from "./resource-policy.js";
 
@@ -377,6 +381,13 @@ export class AdbSlots {
     );
   }
   private context(row: Row, action: "check" | "release") {
+    const own =
+      row.purpose === "run" && row.assignment_id && row.run_id
+        ? `${row.assignment_id}.${row.run_id}`
+        : undefined;
+    const keep = this.store.uow
+      .read((tx) => this.runningSessions(tx, row.project, row.machine))
+      .filter((s) => s !== own);
     return {
       action,
       project: row.project,
@@ -384,6 +395,67 @@ export class AdbSlots {
       generation: row.generation,
       adb_ports: [row.adb_port],
       emulator_ports: row.emulator_port ? [row.emulator_port] : [],
+      ...(own ? { session: own } : {}),
+      ...(keep.length ? { keep_sessions: keep } : {}),
+    };
+  }
+  /**
+   * C-848: `<Assignment>.<Run>` of this project's Runs on the machine that
+   * may still be executing (or are being launched); a slot cleanup never
+   * touches their processes.
+   */
+  private runningSessions(
+    tx: ReadRepositories,
+    project: string,
+    machine: string,
+  ): string[] {
+    const pending = new Set(
+      unfinishedBellAttempts(this.store.database, project).map((b) => b.run_id),
+    );
+    return tx.runs
+      .list(project)
+      .filter(
+        (r) =>
+          (runOccupiesSlot(r) || pending.has(r.id)) &&
+          tx.assignments.get(project, r.assignment_id)?.machine_id === machine,
+      )
+      .map((r) => `${r.assignment_id}.${r.id}`);
+  }
+  /**
+   * C-848: what a release found still running, for its event: the reason,
+   * the slot's ports and the processes (PID, kind, port, parent). Only the
+   * project's own stream gets it; these ports are the ones its Run's launch
+   * environment already carried.
+   */
+  private cleanupDetail(
+    tx: ReadRepositories,
+    row: Row,
+    result: AdbProbeResult,
+  ): Record<string, string | number | boolean> {
+    if (!result.found) return {};
+    const run =
+      row.purpose === "run" && row.run_id
+        ? tx.runs.get(row.project, row.run_id)
+        : undefined;
+    const procs = result.processes ?? [];
+    return {
+      reason: row.purpose === "run" ? "run_ended" : "slot_free",
+      ...(run ? { run_status: run.status } : {}),
+      adb_port: row.adb_port,
+      ...(row.emulator_port ? { emulator_port: row.emulator_port } : {}),
+      ...(procs.length
+        ? {
+            pids: procs.map((p) => p.pid).join(","),
+            processes: procs
+              .map(
+                (p) =>
+                  `${p.kind}:${p.pid}${p.port === undefined ? "" : `:${p.port}`}${p.ppid === undefined ? "" : `:ppid=${p.ppid}`}${p.signalled ? ":signalled" : ""}`,
+              )
+              .join(","),
+            signalled: procs.filter((p) => p.signalled).length,
+            orphaned: procs.filter((p) => p.ppid === 1).length,
+          }
+        : {}),
     };
   }
   private readonly inflight = new Map<string, Promise<void>>();
@@ -439,7 +511,11 @@ export class AdbSlots {
             "UPDATE machine_adb_slots SET released_at=?, release_state=NULL WHERE generation=? AND released_at IS NULL",
           )
           .run(at, row.generation);
-        const base = { machine: row.machine, slot: row.slot };
+        const base = {
+          machine: row.machine,
+          slot: row.slot,
+          ...this.cleanupDetail(tx, row, result),
+        };
         if (row.purpose === "run")
           this.event(tx, row.project, "machine_adb_slot_released", at, {
             ...base,
@@ -471,6 +547,15 @@ export class AdbSlots {
           machine: row.machine,
           slot: row.slot,
           reason,
+          ...(result?.processes?.length
+            ? {
+                pids: result.processes.map((p) => p.pid).join(","),
+                adb_port: row.adb_port,
+                ...(row.emulator_port
+                  ? { emulator_port: row.emulator_port }
+                  : {}),
+              }
+            : {}),
         });
     });
   }
