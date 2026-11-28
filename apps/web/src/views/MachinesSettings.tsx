@@ -97,9 +97,11 @@ import {
 } from "./machine-actions.js";
 import { useNotice } from "./useSettingWrite.js";
 import {
+  rememberWizard,
   storedWizard,
   type WizardExit,
   WorkerWizardDrawer,
+  wizardError,
 } from "./WorkerWizard.js";
 
 /** A read the server refused (401/403) or that is no longer visible (404). */
@@ -302,6 +304,13 @@ export function MachinesSettings({
     if (exit === "kept") setNotice("已保留添加 worker 的进度，可稍后继续");
     else if (exit === "cancelled") setNotice("已放弃添加 worker");
   };
+  /** C-846: a detail page started the checks on a machine's written draft. */
+  const continueWizard = (id: string) => {
+    rememberWizard(projectId, id);
+    setResumable(true);
+    setOpen(undefined);
+    setWizard({});
+  };
   return (
     <SettingsPanel
       id="machines"
@@ -426,6 +435,7 @@ export function MachinesSettings({
           pollMs={pollMs}
           onChanged={changed}
           onClose={() => setOpen(undefined)}
+          onWizard={continueWizard}
         />
       )}
       {wizard && (
@@ -442,6 +452,71 @@ export function MachinesSettings({
   );
 }
 
+/**
+ * C-846: a registered machine whose add-worker draft is already written (for
+ * example after its wizard session was lost) gets remote launch enabled from
+ * its detail page: the checks run again on that draft, then the wizard shows
+ * the launch preview the owner confirms. Owner only, like the wizard.
+ */
+function useRemoteLaunch(
+  client: CardiganClient,
+  projectId: string,
+  machineId: string,
+  allowed: boolean,
+  revision: number,
+  onWizard: (wizardId: string) => void,
+) {
+  const enabled =
+    allowed &&
+    machineId !== "local" &&
+    !!client.machineRemoteLaunch &&
+    !!client.startMachineWorkerWizard;
+  const load = useMemo(
+    () => async () =>
+      (await client.machineRemoteLaunch?.(projectId, machineId))?.remote_launch,
+    [client, projectId, machineId],
+  );
+  // Read only by the owner; any refusal just leaves the button out.
+  const state = useResource(load, revision, enabled);
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string>();
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const reload = state.reload;
+  const start = useCallback(async () => {
+    const run = client.startMachineWorkerWizard;
+    if (!run || starting) return;
+    setStarting(true);
+    setError(undefined);
+    try {
+      const { wizard } = await run.call(client, projectId, machineId);
+      if (alive.current) setStarting(false);
+      onWizard(wizard.id);
+    } catch (cause) {
+      if (!alive.current) return;
+      setStarting(false);
+      setError(wizardError(cause));
+      reload();
+    }
+  }, [client, projectId, machineId, starting, onWizard, reload]);
+  const feedback: RequestFeedbackProps = {
+    pending: starting,
+    pendingMessage: "正在开始检查…",
+    error,
+  };
+  return {
+    available: enabled && !state.error && state.data === "available",
+    starting,
+    start: () => void start(),
+    feedback,
+  };
+}
+
 /** The detail reads the machine again so the facts are current. */
 function MachineDrawer({
   client,
@@ -453,6 +528,7 @@ function MachineDrawer({
   pollMs,
   onChanged,
   onClose,
+  onWizard,
 }: {
   client: CardiganClient;
   projectId: string;
@@ -463,6 +539,8 @@ function MachineDrawer({
   pollMs: number;
   onChanged: () => void;
   onClose: () => void;
+  /** C-846: continue in the add-worker wizard with this session. */
+  onWizard: (wizardId: string) => void;
 }) {
   // Ordered against the Agent limit's writes, which it confirms (C-511).
   const load = useMemo(
@@ -518,6 +596,14 @@ function MachineDrawer({
   const guides = useCapabilityGuides(client, projectId, summary.id, revision);
   const [editing, setEditing] = useState<string>();
   const [guideNotice, setGuideNotice] = useNotice();
+  const launch = useRemoteLaunch(
+    client,
+    projectId,
+    summary.id,
+    canEdit && !!machine,
+    revision,
+    onWizard,
+  );
   return (
     <Drawer
       className={settingsDrawerClassName}
@@ -528,7 +614,21 @@ function MachineDrawer({
       title={machine?.label ?? (withdrawn ? "机器" : summary.label)}
       description={withdrawn ? "机器详情" : `机器 ${summary.id} 详情`}
       initialFocus="close"
-      actions={canEdit && machine ? <MachineButtons {...actions} /> : undefined}
+      actions={
+        canEdit && machine ? (
+          <>
+            {launch.available && (
+              <Button
+                aria-disabled={launch.starting || undefined}
+                onClick={launch.start}
+              >
+                开启远程派发
+              </Button>
+            )}
+            <MachineButtons {...actions} />
+          </>
+        ) : undefined
+      }
     >
       <SettingsConfirmDialog
         open={actions.asking}
@@ -557,6 +657,7 @@ function MachineDrawer({
           <CapacityFeedback capacity={capacity} />
           <RequestFeedback interactive {...actions.checkFeedback} />
           <RequestFeedback interactive {...actions.drainFeedback} />
+          <RequestFeedback interactive {...launch.feedback} />
           <RequestFeedback {...guides.feedback} />
           <RequestFeedback message={guideNotice} />
         </SettingsDrawerFeedback>

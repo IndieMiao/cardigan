@@ -59,8 +59,8 @@ import { useNotice } from "./useSettingWrite.js";
 
 /**
  * C-511: the add-worker wizard (C-510 backend). The server keeps the session
- * for 24 hours in its own process; the browser only remembers its id per
- * project, so leaving and coming back continues from the current step.
+ * for 24 hours, also across restarts (C-846); the browser only remembers its
+ * id per project, so leaving and coming back continues from the current step.
  */
 const storageKey = (projectId: string) => `cardigan.worker-wizard.${projectId}`;
 export function storedWizard(projectId: string): string | undefined {
@@ -70,7 +70,7 @@ export function storedWizard(projectId: string): string | undefined {
     return undefined;
   }
 }
-function rememberWizard(projectId: string, id: string | undefined) {
+export function rememberWizard(projectId: string, id: string | undefined) {
   try {
     if (id) window.localStorage.setItem(storageKey(projectId), id);
     else {
@@ -170,6 +170,11 @@ const WIZARD_ERRORS: Readonly<Record<string, string>> = {
     "配对码已使用，每个码只能用一次。需要重新接入时，请在设备上重新运行命令。",
   pairing_rate_limited: "配对码错误次数过多，请稍后再试。",
   capacity: "向导会话已满，请先完成或放弃其它添加 worker 的进度。",
+  // C-846
+  worker_check_interrupted: "服务重启打断了检查，请继续检查。",
+  worker_draft_missing:
+    "这台机器没有向导写入的接入配置，请用“添加 worker”接入。",
+  worker_already_enabled: "这台机器已开启远程派发。",
 };
 /** Refusals the server ties to one field: shown beside it, not on top. */
 const FIELD_ERRORS: Readonly<Record<string, keyof Form>> = {
@@ -178,7 +183,7 @@ const FIELD_ERRORS: Readonly<Record<string, keyof Form>> = {
   worker_mcp_url_invalid: "mcp_url",
   worker_mcp_url_conflict: "mcp_url",
 };
-function wizardError(error: unknown): string {
+export function wizardError(error: unknown): string {
   if (error instanceof ApiError) {
     const known = WIZARD_ERRORS[error.code];
     // C-707: a paired device the host cannot draft keeps its code.
@@ -190,7 +195,7 @@ function wizardError(error: unknown): string {
       return `${known ?? error.message}配对码仍可使用，处理后再确认接入。`;
     if (known) return known;
     if (error.status === 404)
-      return "向导已失效（服务重启或超过 24 小时），请重新填写。";
+      return "向导已失效（已放弃或超过 24 小时），请重新填写。";
     if (error.status === 503) return "向导服务不可用，请稍后再试。";
   }
   return describeWriteError(error);
@@ -1016,7 +1021,9 @@ export function WorkerWizardDrawer({
                 )}
                 {content.error && (
                   <SettingsFact label="中断原因">
-                    <code>{content.error}</code>
+                    {WIZARD_ERRORS[content.error] ?? (
+                      <code>{content.error}</code>
+                    )}
                   </SettingsFact>
                 )}
               </SettingsFacts>

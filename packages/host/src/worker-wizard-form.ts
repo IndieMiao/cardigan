@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { parse } from "yaml";
 import {
   workerDirectoryCommand,
   workerReleaseRoot,
@@ -8,7 +9,98 @@ import {
   onboardingDigest,
   onboardingFail,
   parseWorkerOnboarding,
+  readWorkerPrivateFile,
 } from "./worker-onboarding-config.js";
+
+/** C-846: the generated work root of the read-only-root (SteamOS) layout. */
+const homeWorkRoot = (project: string) => `/home/cardigan-workers/${project}`;
+/** C-846: the draft the wizard wrote for this binding, parsed, if any. */
+function readDraft(root: string, project: string, machine: string) {
+  workerJournalId(project, machine);
+  const bytes = readWorkerPrivateFile(
+    join(root, `worker-${machine}-${project}.yaml`),
+  );
+  if (!bytes) return undefined;
+  try {
+    return parse(bytes.toString("utf8")) as unknown;
+  } catch {
+    return onboardingFail("worker_config_invalid");
+  }
+}
+const field = (value: unknown, key: string): unknown =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+const first = (value: unknown): unknown =>
+  Array.isArray(value) ? value[0] : undefined;
+/**
+ * C-846: the layout of the draft this binding already has. A draft written
+ * with the read-only-root layout (a paired SteamOS device) keeps its work
+ * root, helpers and commands under /home when the wizard is entered again,
+ * instead of falling back to /srv.
+ */
+export function workerDraftLayout(
+  root: string,
+  project: string,
+  machine: string,
+): "home" | undefined {
+  const raw = readDraft(root, project, machine);
+  const m = first(field(field(raw, "runtime"), "machines"));
+  const binding = first(field(m, "projects"));
+  return field(m, "os") === "linux" &&
+    field(binding, "root") === homeWorkRoot(project)
+    ? "home"
+    : undefined;
+}
+/**
+ * C-846: the wizard form an existing draft was generated from, so a machine
+ * whose draft is already written can continue without the form. Nothing when
+ * there is no draft; `worker_config_conflict` when the file is not what the
+ * wizard generates from these values (edited by hand, or another binding).
+ */
+export function workerDraftForm(
+  root: string,
+  dataDir: string,
+  project: string,
+  machine: string,
+  label: string,
+): Record<string, unknown> | undefined {
+  const raw = readDraft(root, project, machine);
+  if (raw === undefined) return undefined;
+  const config = parseWorkerOnboarding(raw, dataDir);
+  if (
+    config.worker.machine_id !== machine ||
+    config.worker.project_id !== project
+  )
+    return onboardingFail("worker_config_conflict");
+  const m = first(field(field(raw, "runtime"), "machines"));
+  const binding = first(field(m, "projects"));
+  const linux = field(m, "os") === "linux";
+  const form = {
+    machine_id: machine,
+    label,
+    account: field(binding, "user"),
+    uid: field(raw, "uid"),
+    gid: field(binding, "gid"),
+    os: linux ? "linux" : "macos",
+    arch: field(m, "arch"),
+    host: field(m, "host"),
+    port: field(m, "port"),
+    mcp_url: field(raw, "mcp_url"),
+    ...(linux && field(binding, "root") === homeWorkRoot(project)
+      ? { layout: "home" }
+      : {}),
+  };
+  let generated: ReturnType<typeof workerWizardForm>;
+  try {
+    generated = workerWizardForm(root, dataDir, project, form);
+  } catch {
+    return onboardingFail("worker_config_conflict");
+  }
+  if (generated.config.digest !== config.digest)
+    return onboardingFail("worker_config_conflict");
+  return form;
+}
 
 /** UI supplies data, not YAML, commands, executable paths or a dispatch switch. */
 export function workerWizardForm(
@@ -69,7 +161,11 @@ export function workerWizardForm(
   workerJournalId(project, machine);
   const mac = os !== "linux",
     home = `${mac ? "/Users" : "/home"}/${account}`,
-    work = `${mac ? "/Users" : layout === "home" ? "/home" : "/srv"}/cardigan-workers/${project}`;
+    work = mac
+      ? `/Users/cardigan-workers/${project}`
+      : layout === "home"
+        ? homeWorkRoot(project)
+        : `/srv/cardigan-workers/${project}`;
   const alias = `cg-${onboardingDigest([project, machine]).slice(0, 20)}`;
   const raw = {
     version: 1,
