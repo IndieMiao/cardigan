@@ -14,6 +14,7 @@ import {
   type Runtime,
   reviewReceiptTargetCurrent,
   runModelOutputTime,
+  upstreamOutageOfRun,
 } from "@cardigan/domain";
 import { tryHostOpsLock, turnSessionKey, wakeIsCurrent } from "@cardigan/host";
 import { loadCommandState } from "@cardigan/mcp-server";
@@ -122,6 +123,8 @@ export class ClientRecovery {
       !assignmentCardHeld(a, s, run.trigger_event_id) &&
       assignmentDependenciesAllowStart(s, a) &&
       reviewReceiptTargetCurrent(s, a, run) &&
+      // C-842: a Run the upstream outage flow took gets its resume there.
+      !upstreamOutageOfRun(s, run.id) &&
       (a.scope !== "work_item" ||
         (w?.assignment_id === a.id && w.status === "in_progress")) &&
       !unfinishedBellAttempts(this.options.store.database, s.project_id, a.id)

@@ -31,6 +31,7 @@ import {
   loadMachineCapabilityCatalog,
   parseCapabilityVersion,
   parseMachineCapabilityCatalog,
+  suggestedForGpu,
 } from "./machine-capability-catalog.js";
 import {
   CAPABILITY_PROBE_SCRIPT,
@@ -1085,4 +1086,22 @@ test("C-815: 安卓设备任一 is provided by a verified emulator or a usable d
   } finally {
     store.close();
   }
+});
+
+test("C-843: GPU tools are suggested only for a GPU of their vendor", () => {
+  const deck =
+    "Advanced Micro Devices, Inc. [AMD/ATI] VanGogh [AMD Custom GPU 0405]";
+  expect(suggestedForGpu("gpu.nvidia", deck)).toBe(false);
+  expect(
+    suggestedForGpu(
+      "gpu.nvidia",
+      "NVIDIA Corporation AD104 [GeForce RTX 4070]",
+    ),
+  ).toBe(true);
+  expect(suggestedForGpu("gpu.apple", "Apple M2 Pro")).toBe(true);
+  expect(suggestedForGpu("gpu.apple", "Intel Iris Plus Graphics")).toBe(false);
+  // No GPU report (a hand-filled wizard): unchanged.
+  expect(suggestedForGpu("gpu.nvidia", undefined)).toBe(true);
+  // Not a GPU capability.
+  expect(suggestedForGpu("godot", deck)).toBe(true);
 });

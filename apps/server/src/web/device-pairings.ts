@@ -58,14 +58,20 @@ export interface PairingDevice {
   readonly cpu?: string;
   readonly cpu_cores?: number;
   readonly memory_bytes?: number;
-  /** The volume the work root goes on. */
-  readonly disk_path?: DiskPath;
-  readonly disk_total_bytes?: number;
-  readonly disk_free_bytes?: number;
+  /**
+   * C-843: the volumes the work root can go on, each listed once; a path on
+   * the same volume as `/` is left out. The report picks the work root's.
+   */
+  readonly disks?: readonly PairingDisk[];
   readonly gpu?: string;
 }
-const DISK_PATHS = ["/", "/home", "/Users"] as const;
+const DISK_PATHS = ["/", "/home", "/srv", "/Users"] as const;
 type DiskPath = (typeof DISK_PATHS)[number];
+export interface PairingDisk {
+  readonly path: DiskPath;
+  readonly total_bytes: number;
+  readonly free_bytes: number;
+}
 /** Printable text of at most `max` characters, trimmed. */
 const factText = (value: unknown, max: number) =>
   typeof value === "string" &&
@@ -104,6 +110,43 @@ const digest = (value: string) =>
 const invalidDevice = () =>
   new HttpRejection(400, "validation_failed", "设备信息无效");
 
+function parseDisk(
+  path: unknown,
+  total: unknown,
+  free: unknown,
+): PairingDisk | undefined {
+  return DISK_PATHS.includes(path as DiskPath) &&
+    factCount(total, 1) &&
+    factCount(free, 0) &&
+    (free as number) <= (total as number)
+    ? {
+        path: path as DiskPath,
+        total_bytes: total as number,
+        free_bytes: free as number,
+      }
+    : undefined;
+}
+/** Well-formed volumes, one per path; the rest are dropped. */
+function parseDisks(v: Record<string, unknown>): PairingDisk[] {
+  const { disks, disk_path, disk_total_bytes, disk_free_bytes } = v;
+  const entry = (d: unknown) => {
+    const e = d as Record<string, unknown> | null;
+    return typeof e === "object" &&
+      e !== null &&
+      !Array.isArray(e) &&
+      Object.keys(e).length === 3
+      ? parseDisk(e.path, e.total_bytes, e.free_bytes)
+      : undefined;
+  };
+  const listed = Array.isArray(disks)
+    ? disks.slice(0, 16).map(entry)
+    : [parseDisk(disk_path, disk_total_bytes, disk_free_bytes)];
+  const out: PairingDisk[] = [];
+  for (const d of listed)
+    if (d && !out.some((o) => o.path === d.path)) out.push(d);
+  return out;
+}
+
 export function parseDevice(value: unknown): PairingDevice {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw invalidDevice();
@@ -119,6 +162,8 @@ export function parseDevice(value: unknown): PairingDevice {
     "cpu",
     "cpu_cores",
     "memory_bytes",
+    "disks",
+    // C-707 scripts reported one volume; still accepted.
     "disk_path",
     "disk_total_bytes",
     "disk_free_bytes",
@@ -129,12 +174,7 @@ export function parseDevice(value: unknown): PairingDevice {
   // C-707: a malformed hardware fact is dropped, never a reason to refuse
   // the pairing: the report only shows it as not reported.
   const { cpu, cpu_cores, memory_bytes, gpu } = v;
-  const { disk_path, disk_total_bytes, disk_free_bytes } = v;
-  const disk =
-    DISK_PATHS.includes(disk_path as DiskPath) &&
-    factCount(disk_total_bytes, 1) &&
-    factCount(disk_free_bytes, 0) &&
-    (disk_free_bytes as number) <= (disk_total_bytes as number);
+  const disks = parseDisks(v);
   if (
     typeof hostname !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9-]{0,62}$/u.test(hostname) ||
@@ -169,13 +209,7 @@ export function parseDevice(value: unknown): PairingDevice {
     ...(factCount(memory_bytes, 1)
       ? { memory_bytes: memory_bytes as number }
       : {}),
-    ...(disk
-      ? {
-          disk_path: disk_path as DiskPath,
-          disk_total_bytes: disk_total_bytes as number,
-          disk_free_bytes: disk_free_bytes as number,
-        }
-      : {}),
+    ...(disks.length ? { disks } : {}),
     ...(factText(gpu, 160) ? { gpu: (gpu as string).trim() } : {}),
   };
 }

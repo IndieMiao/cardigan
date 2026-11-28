@@ -19,6 +19,7 @@ import {
   type MachineCheckJournal,
   planWorkerFile,
   runCapacityMachines,
+  suggestedForGpu,
   type WizardFilePlan,
   WorkerOnboardingError,
   workerMcpConfig,
@@ -174,6 +175,8 @@ function view(s: Session, report?: Report) {
     phase: s.phase,
     steps: s.steps,
     commands: s.draft.commands,
+    // C-843: the report shows the free space of the volume holding it.
+    work_root: s.draft.config.worker.execution.agentRoot,
     command_guide:
       s.draft.config.worker.os === "darwin"
         ? "docs/macos-worker.md"
@@ -406,7 +409,13 @@ export class WorkerWizards {
           }),
         ),
         suggested: capabilities
-          .filter((c) => c.state !== "verified" && declared.includes(c.key))
+          .filter(
+            (c) =>
+              c.state !== "verified" &&
+              declared.includes(c.key) &&
+              // C-843: no NVIDIA tools for an AMD GPU.
+              suggestedForGpu(c.key, s.pairing?.device.gpu),
+          )
           .map((c) => c.key),
       };
     });

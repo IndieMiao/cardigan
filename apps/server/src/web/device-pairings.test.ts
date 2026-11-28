@@ -307,6 +307,44 @@ test.runIf(process.platform === "linux")(
       const kept = await f.claim((odd.json as { code: string }).code);
       expect(kept.status, kept.text).toBe(201);
       expect((kept.json as { device: unknown }).device).toEqual(device);
+      // C-843: each volume is checked on its own; the rest stay.
+      const disk = { path: "/", total_bytes: 10, free_bytes: 4 };
+      for (const [disks, kept] of [
+        ["/", undefined],
+        [
+          [disk, { ...disk, path: "/tmp" }, { ...disk, free_bytes: 11 }],
+          [disk],
+        ],
+        [
+          [{ ...disk, extra: 1 }, null, [], { ...disk, path: "/home" }, disk],
+          [{ ...disk, path: "/home" }, disk],
+        ],
+        [
+          [disk, disk, { ...disk, path: "/srv" }],
+          [disk, { ...disk, path: "/srv" }],
+        ],
+      ] as const) {
+        const r = await f.pair({ device: { ...device, disks } });
+        expect(r.status, r.text).toBe(201);
+        const c = await f.claim((r.json as { code: string }).code);
+        expect(
+          (c.json as { device: { disks?: unknown } }).device.disks,
+          JSON.stringify(disks),
+        ).toEqual(kept);
+      }
+      // A C-707 script's single volume still reads.
+      const legacy = await f.pair({
+        device: {
+          ...device,
+          disk_path: "/home",
+          disk_total_bytes: 10,
+          disk_free_bytes: 4,
+        },
+      });
+      const old = await f.claim((legacy.json as { code: string }).code);
+      expect(
+        (old.json as { device: { disks?: unknown } }).device.disks,
+      ).toEqual([{ path: "/home", total_bytes: 10, free_bytes: 4 }]);
       const foreign = await f.call("/api/device-pairings", {
         method: "POST",
         body: { device },
@@ -562,13 +600,19 @@ const hardware = {
   cpu: "AMD Custom APU 0405",
   cpu_cores: 8,
   memory_bytes: 16 * 1024 ** 3,
-  disk_path: "/home",
-  disk_total_bytes: 512 * 1024 ** 3,
-  disk_free_bytes: 400 * 1024 ** 3,
-  gpu: "AMD Custom GPU 0405",
+  disks: [
+    { path: "/", total_bytes: 5 * 1024 ** 3, free_bytes: 866 * 1024 ** 2 },
+    {
+      path: "/home",
+      total_bytes: 900 * 1024 ** 3,
+      free_bytes: 833 * 1024 ** 3,
+    },
+  ],
+  gpu: "Advanced Micro Devices, Inc. [AMD/ATI] VanGogh [AMD Custom GPU 0405]",
 };
 interface ReportView extends WizardView {
   device?: Record<string, unknown>;
+  work_root?: string;
   run_limit?: { value: number; state: string };
   report?: {
     capabilities: { key: string; state: string }[];
@@ -609,6 +653,9 @@ test.runIf(process.platform === "linux")(
       expect(claimed.status, claimed.text).toBe(201);
       const w = (claimed.json as { wizard: ReportView & WizardView }).wizard;
       expect(w.device).toEqual({ ...device, ...hardware });
+      // C-843: SteamOS puts the work root under /home; the report reads
+      // that volume from the device's list.
+      expect(w.work_root).toBe("/home/cardigan-workers/cross");
       expect(w.run_limit).toEqual({ value: 2, state: "pending" });
       expect(w.report).toBeUndefined();
       // Nothing is set before the machine registers.
@@ -639,6 +686,11 @@ test.runIf(process.platform === "linux")(
         expect.arrayContaining(["node", "godot", "blender"]),
       );
       expect(passed.report?.suggested).not.toContain("xcode");
+      // C-843: an AMD GPU gets no NVIDIA tools.
+      expect(passed.report?.suggested).not.toContain("gpu.nvidia");
+      expect(passed.report?.capabilities).toContainEqual(
+        expect.objectContaining({ key: "gpu.nvidia", state: "unverified" }),
+      );
       expect(passed.report?.capabilities).toContainEqual(
         expect.objectContaining({ key: "node", state: "unverified" }),
       );
@@ -724,9 +776,14 @@ test.runIf(process.platform === "linux")(
       expect(waiting.out()).not.toContain("device_token");
       const claimed = await f.claim(code);
       expect(claimed.status, claimed.text).toBe(201);
-      expect(
-        (claimed.json as { device: { address: string } }).device.address,
-      ).toBe("deck.example.ts.net");
+      const paired = (
+        claimed.json as {
+          device: { address: string; disks?: { path: string }[] };
+        }
+      ).device;
+      expect(paired.address).toBe("deck.example.ts.net");
+      // C-843: the script's volumes pass the server's checks; `/` first.
+      expect(paired.disks?.[0]?.path).toBe("/");
       expect(await waiting.done).toBe(0);
       expect(waiting.out()).toContain("已在 Workbench 确认");
 
@@ -899,6 +956,84 @@ test.runIf(process.platform === "linux")(
     expect(code).toBe(0);
     expect(/RESULT (.+)/u.exec(stdout)?.[1]?.trim()).toBe('["later", true]');
     expect(stdout).not.toContain("没有可用的终端");
+  },
+  20_000,
+);
+
+// C-843: SteamOS keeps a 5 GiB read-only `/`; /home is its own volume and
+// /srv sits on `/`. A missing candidate is skipped.
+const DISK_HARNESS = `import importlib.util, json, os, shutil, sys
+spec = importlib.util.spec_from_file_location('pair_device', sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+G, M = 1 << 30, 1 << 20
+layout = json.loads(sys.argv[2])
+class Stat:
+    def __init__(self, dev):
+        self.st_dev = dev
+def stat(path):
+    if path not in layout:
+        raise FileNotFoundError(path)
+    return Stat(layout[path][0])
+def usage(path):
+    _, total, free = layout[path]
+    return shutil._ntuple_diskusage(total, total - free, free)
+os.stat = stat
+shutil.disk_usage = usage
+print(json.dumps([mod.disk_facts(o) for o in ('linux', 'darwin')]))`;
+
+test.runIf(process.platform === "linux")(
+  "C-843: the device script lists each volume a work root can go on once",
+  async () => {
+    const G = 1024 ** 3;
+    const facts = async (layout: Record<string, [number, number, number]>) => {
+      const child = spawn(
+        "python3",
+        ["-IB", "-c", DISK_HARNESS, SCRIPT, JSON.stringify(layout)],
+        {
+          env: { PATH: "/usr/bin:/bin", LANG: "C.UTF-8" },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => {
+        stdout += d;
+      });
+      child.stderr.on("data", (d) => {
+        stderr += d;
+      });
+      expect(await new Promise((ok) => child.on("close", ok)), stderr).toBe(0);
+      return JSON.parse(stdout);
+    };
+    const disk = (path: string, total: number, free: number) => ({
+      path,
+      total_bytes: total,
+      free_bytes: free,
+    });
+    // SteamOS: the work root's /home is listed apart from the small `/`.
+    expect(
+      await facts({
+        "/": [1, 5 * G, 866 * 1024 ** 2],
+        "/home": [2, 900 * G, 833 * G],
+        "/srv": [1, 5 * G, 866 * 1024 ** 2],
+      }),
+    ).toEqual([
+      [disk("/", 5 * G, 866 * 1024 ** 2), disk("/home", 900 * G, 833 * G)],
+      [],
+    ]);
+    // One volume (a plain Linux worker): only `/`; macOS reads /Users.
+    expect(
+      await facts({
+        "/": [1, 100 * G, 40 * G],
+        "/home": [1, 100 * G, 40 * G],
+        "/srv": [1, 100 * G, 40 * G],
+        "/Users": [3, 500 * G, 200 * G],
+      }),
+    ).toEqual([
+      [disk("/", 100 * G, 40 * G)],
+      [disk("/Users", 500 * G, 200 * G)],
+    ]);
   },
   20_000,
 );

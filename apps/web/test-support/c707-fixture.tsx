@@ -54,9 +54,14 @@ const device = {
   cpu: "AMD Custom APU 0405",
   cpu_cores: 8,
   memory_bytes: 16 * 1024 ** 3,
-  disk_path: "/home",
-  disk_total_bytes: 512 * 1024 ** 3,
-  disk_free_bytes: 401 * 1024 ** 3,
+  disks: [
+    { path: "/", total_bytes: 5 * 1024 ** 3, free_bytes: 866 * 1024 ** 2 },
+    {
+      path: "/home",
+      total_bytes: 512 * 1024 ** 3,
+      free_bytes: 401 * 1024 ** 3,
+    },
+  ],
   gpu: "AMD Custom GPU 0405",
 };
 const base = (paired: boolean): WorkerWizardView => ({
@@ -78,6 +83,7 @@ const base = (paired: boolean): WorkerWizardView => ({
     helpers:
       "sudo install -o root -g cg_p_1 -m 0750 /home/cardigan-release/deploy/worker-files.py /home/cardigan-workers/p-1/libexec/worker-files.py",
   },
+  work_root: "/home/cardigan-workers/p-1",
   command_guide: "docs/steamos-worker.md",
   command_prerequisites:
     "仅在目标机管理员终端执行。新建账号前核对名称和数字身份均空闲；按操作手册准备受保护的安装包、目录、认领标记和本机安装配置。已有冲突请停下核对。",

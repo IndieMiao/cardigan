@@ -2,7 +2,6 @@ import {
   type Assignment,
   type Clock,
   type CommandState,
-  DEFAULT_UPSTREAM_OUTAGE_POLICY,
   eventsOfType,
   type ProjectId,
   type PromptBinding,
@@ -12,7 +11,9 @@ import {
   recordUpstreamOutageSession,
   remindUpstreamOutage,
   resolveUpstreamOutage,
+  resolveUpstreamOutagePolicy,
   runHeldByUpstreamOutage,
+  type UpstreamApiError,
   type UpstreamOutage,
   type UpstreamOutagePolicy,
   type UpstreamOutageResumeResult,
@@ -56,13 +57,15 @@ type Harness = PromptBinding["harness"];
 export function upstreamOutagePolicy(
   config: LaunchConfig | undefined,
 ): UpstreamOutagePolicy {
-  const set = config?.upstream_outage;
-  const d = DEFAULT_UPSTREAM_OUTAGE_POLICY;
-  return {
-    probe_interval_ms: set?.probe_interval_ms ?? d.probe_interval_ms,
-    remind_after_ms: set?.remind_after_ms ?? d.remind_after_ms,
-    resume_window_ms: set?.resume_window_ms ?? d.resume_window_ms,
-  };
+  return resolveUpstreamOutagePolicy(config?.upstream_outage);
+}
+/** C-842: ClientRecovery already took this Run's disconnect. */
+function clientRecoveryTook(state: CommandState, run: Run["id"]) {
+  return ["client_resume_claimed", "client_resume_attention"].some((type) =>
+    eventsOfType(state.events, type).some(
+      (e) => (e.payload as { run_id?: string } | null)?.run_id === run,
+    ),
+  );
 }
 
 /** The Run's provider: its launch profile's provider, else that profile's harness. */
@@ -113,7 +116,12 @@ export class UpstreamOutageRecovery {
   held(state: CommandState, run: Run["id"], at: string) {
     return runHeldByUpstreamOutage(state, run, at, this.policy());
   }
-  private binding(project: ProjectId, a: Assignment, run: Run) {
+  private binding(
+    project: ProjectId,
+    a: Assignment,
+    run: Run,
+    error: UpstreamApiError = "outage",
+  ) {
     if (!run.harness || !harnesses.has(run.harness) || !a.runtime_ref) return;
     return {
       ref: a.runtime_ref,
@@ -121,18 +129,36 @@ export class UpstreamOutageRecovery {
         project_id: project,
         assignment_id: a.id,
         harness: run.harness as Harness,
-        require_upstream_error: true as const,
+        require_upstream_error:
+          error === "disconnect" ? ("disconnect" as const) : (true as const),
       },
     };
   }
-  /** Read-only: the bound CLI sits at an empty editor under a model API error. */
-  async errorVisible(project: ProjectId, a: Assignment, run: Run) {
-    const target = this.binding(project, a, run);
+  private async observe(
+    project: ProjectId,
+    a: Assignment,
+    run: Run,
+    error: UpstreamApiError,
+  ) {
+    const target = this.binding(project, a, run, error);
     if (!target || !this.options.runtime.observe_prompt) return false;
     const observed = await this.options.runtime
       .observe_prompt(target.ref, target.binding)
       .catch(() => undefined);
     return !!(observed?.ok && observed.value);
+  }
+  /**
+   * Read-only: the model API error the bound CLI's empty editor sits under,
+   * an outage or (C-842) a dropped connection; undefined for neither.
+   */
+  async errorVisible(
+    project: ProjectId,
+    a: Assignment,
+    run: Run,
+  ): Promise<UpstreamApiError | undefined> {
+    if (await this.observe(project, a, run, "outage")) return "outage";
+    if (this.closing()) return;
+    if (await this.observe(project, a, run, "disconnect")) return "disconnect";
   }
   /** Inside the caller's transaction; true when the Run now waits for its outage. */
   record(
@@ -140,12 +166,15 @@ export class UpstreamOutageRecovery {
     before: CommandState,
     a: Assignment,
     run: Run,
+    error: UpstreamApiError = "outage",
   ) {
     // Several Runs can stop in one transaction: each must see the outage
     // the previous one opened.
     const state = loadCommandState(tx, before.project_id);
-    if (upstreamOutageOfRun(state, run.id))
-      return this.held(state, run.id, this.clock.now());
+    if (this.held(state, run.id, this.clock.now())) return true;
+    // One sender per disconnect: client recovery keeps a Run it took.
+    if (error === "disconnect" && clientRecoveryTook(state, run.id))
+      return false;
     const { provider, profile } = runUpstream(
       this.options.upstreamOutage.launch(),
       state,
@@ -160,6 +189,8 @@ export class UpstreamOutageRecovery {
         assignment_id: a.id,
         run_id: run.id,
         profile,
+        error,
+        disconnect_limit: this.policy().disconnect_resume_limit,
       },
       { clock: this.clock, ids: tx.ids },
     );
@@ -222,8 +253,8 @@ export class UpstreamOutageRecovery {
       const a = s.assignments.find((x) => x.id === run.assignment_id);
       if (a?.status !== "active" || a.external) continue;
       this.nextRead.set(key, now + SCREEN_READ_INTERVAL_MS);
-      if (!(await this.errorVisible(s.project_id, a, run)) || this.closing())
-        continue;
+      const error = await this.errorVisible(s.project_id, a, run);
+      if (!error || this.closing()) continue;
       this.write(s.project_id, (tx, state) => {
         const owner = state.assignments.find((x) => x.id === a.id);
         const current = state.runs.find((r) => r.id === run.id);
@@ -231,7 +262,7 @@ export class UpstreamOutageRecovery {
           !!owner &&
           current?.status === "running" &&
           JSON.stringify(owner.runtime_ref) === JSON.stringify(a.runtime_ref) &&
-          this.record(tx, state, owner, current)
+          this.record(tx, state, owner, current, error)
         );
       });
     }
@@ -345,6 +376,7 @@ export class UpstreamOutageRecovery {
       !a.role_upgrade &&
       a.idle_retirement?.phase !== "stopping" &&
       wakeIsCurrent(state, a, run.id) &&
+      !clientRecoveryTook(state, run.id) &&
       !unfinishedBellAttempts(
         this.options.store.database,
         state.project_id,
@@ -366,7 +398,7 @@ export class UpstreamOutageRecovery {
       const a = s.assignments.find((x) => x.id === session.assignment_id);
       const run = s.runs.find((r) => r.id === session.run_id);
       if (!a || !run || !this.eligible(s, a, run)) continue;
-      const target = this.binding(project, a, run);
+      const target = this.binding(project, a, run, session.error);
       if (!target) continue;
       const result = (value: UpstreamOutageResumeResult) =>
         this.write(project, (tx, state) => {
@@ -400,7 +432,9 @@ export class UpstreamOutageRecovery {
         const sent = await this.options.runtime
           .wake(
             target.ref,
-            `模型服务 ${outage.provider} 在 ${clock(outage.started_at)} 到 ${clock(resolved)} 中断，现已恢复。请从中断处继续当前 ${run.id} 的工作。`,
+            session.error === "disconnect"
+              ? `上一条回复因与模型服务 ${outage.provider} 的连接中断没有完成，服务现在可用。请从中断处继续当前 ${run.id} 的工作。`
+              : `模型服务 ${outage.provider} 在 ${clock(outage.started_at)} 到 ${clock(resolved)} 中断，现已恢复。请从中断处继续当前 ${run.id} 的工作。`,
             {
               prompt_binding: target.binding,
               ...(target.ref.machine_id !== "local"

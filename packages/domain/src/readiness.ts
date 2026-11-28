@@ -136,6 +136,31 @@ export function pausedCards(
   ];
 }
 
+/**
+ * C-840: cards whose unfinished required work items are among these work
+ * items. A human action whose follow-up (or blocked) work is such an item is
+ * part of finishing that card, so it may never wait for that card's merge.
+ */
+export function unfinishedRequiredCards(
+  items: readonly {
+    readonly card_id: CardId;
+    readonly required: boolean;
+    readonly status: string;
+  }[],
+): CardId[] {
+  return [
+    ...new Set(
+      items
+        .filter(
+          (w) =>
+            w.required &&
+            !["accepted", "passed", "cancelled"].includes(w.status),
+        )
+        .map((w) => w.card_id),
+    ),
+  ];
+}
+
 function completionSubmitted(state: ReadinessState, card_id: CardId) {
   return cardDeliveries(state, card_id).some(
     (v) => v.kind === "card_completion" && v.status !== "superseded",
@@ -185,10 +210,14 @@ export type ReadyConditionInput =
 export function normalizeReadyCondition(
   state: ReadinessState,
   input: ReadyConditionInput,
-  /** Cards the item holds and the cards whose work it pauses. */
+  /**
+   * Cards the item holds, the cards whose work it pauses and (C-840) the
+   * cards whose unfinished required work items the item's work items are.
+   */
   owner: {
     readonly held: readonly CardId[];
     readonly paused: readonly CardId[];
+    readonly required?: readonly CardId[];
   },
   allowManual: boolean,
 ): ReadyCondition | string {
@@ -203,6 +232,8 @@ export function normalizeReadyCondition(
   if (input.kind === "card_merged") {
     if (owner.held.includes(card.id) || owner.paused.includes(card.id))
       return `这个事项挡着 ${card.id} 的合并或工作，不能等 ${card.id} 合并，会互相等待`;
+    if (owner.required?.includes(card.id))
+      return `这个事项的后续工作项是 ${card.id} 尚未完成的必需项，${card.id} 要等它做完才能合并，不能等 ${card.id} 合并，会互相等待`;
     return { kind: "card_merged", card_id: card.id };
   }
   // The paused work is what would produce that delivery.
