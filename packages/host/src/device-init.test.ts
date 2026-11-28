@@ -132,7 +132,11 @@ spec.loader.exec_module(mod)
 if 'plan' in scenario:
     mod.PLAN = scenario['plan']
 mod.PREFIX = root
-mod.MIN_FREE = 1
+if 'free' in scenario:
+    # Free bytes per path as the script asks for them; others have plenty.
+    mod.free_bytes = lambda path: scenario['free'].get(path[len(root):] or '/', 1 << 50)
+else:
+    mod.MIN_FREE = mod.CONFIG_FREE = 1
 taken, log, owners = scenario.get('taken', {}), [], {}
 mod.is_root = lambda: True
 mod.current_os = lambda: scenario.get('os', 'linux')
@@ -150,7 +154,7 @@ mod.user_taken = lambda name=None, uid=None: name in taken.get('names', []) or u
 mod.group_taken = lambda name=None, gid=None: name in taken.get('groups', []) or gid in taken.get('ids', [])
 mod.directory_records = lambda kind, attribute: taken.get('records', [])
 mod.account_record = lambda name: tuple(scenario['record'])
-mod.mount_of = lambda system, path: '/'
+mod.mount_of = lambda system, path: scenario.get('mount', '/')
 listing = list(scenario.get('listing', ['denied']))
 def sudo_listing(account):
     log.append(['sudo_listing', account])
@@ -516,6 +520,53 @@ test("macOS uses dscl and the macOS paths; a read-only-root Linux plan uses /hom
     owner: [0, 0],
   });
   expect(deck.tree["/srv/cardigan-workers"]).toBeUndefined();
+});
+
+test("C-839: free space is required where it writes: 1 GiB for the work root and HOME, little for /etc; a read-only / is not checked", async () => {
+  const MiB = 1024 ** 2;
+  const GiB = 1024 ** 3;
+  // Steam Deck as measured: / is the read-only image, /etc an overlay.
+  const steamos = { "/": 867 * MiB, "/etc": 120 * MiB, "/home": 833 * GiB };
+  const script = deviceInitScript(
+    plan({ work: "/home/cardigan-workers/demo" }),
+  );
+  const deck = await scenario(script, { mount: "/home", free: steamos });
+  expect(deck.code, deck.err).toBe(0);
+  expect(
+    JSON.parse(deck.tree["/etc/cardigan/worker-demo.json"]?.text ?? ""),
+  ).toMatchObject({
+    mount: "/home",
+    minimum_free_bytes: { root: 16 * MiB, work: GiB },
+  });
+
+  const full = await scenario(script, {
+    mount: "/home",
+    free: { ...steamos, "/home": 900 * MiB },
+  });
+  expect(full.code).toBe(3);
+  expect(full.err).toContain("/home 可用空间不足 1 GiB");
+  expect(full.err).not.toContain("/etc");
+  expect(before(full)).toEqual([]);
+
+  const etc = await scenario(script, {
+    mount: "/home",
+    free: { ...steamos, "/etc": 8 * MiB, "/etc/sudoers.d": 8 * MiB },
+  });
+  expect(etc.code).toBe(3);
+  expect(etc.err).toContain("/etc 可用空间不足 16 MiB");
+  expect(etc.err).toContain("/etc/sudoers.d 可用空间不足 16 MiB");
+  expect(etc.err).not.toContain("/home");
+  expect(before(etc)).toEqual([]);
+
+  // A work root on its own volume is checked there, HOME on its own.
+  const srv = await scenario(deviceInitScript(plan()), {
+    mount: "/srv",
+    free: { "/": 2 * GiB, "/srv": 100 * MiB, "/home": 100 * MiB },
+  });
+  expect(srv.code).toBe(3);
+  expect(srv.err).toContain("/srv 可用空间不足 1 GiB");
+  expect(srv.err).toContain("/home 可用空间不足 1 GiB");
+  expect(srv.err).not.toContain("  - / ");
 });
 
 test("an altered plan cannot widen the scope", async () => {

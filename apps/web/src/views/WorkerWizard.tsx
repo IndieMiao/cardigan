@@ -336,6 +336,20 @@ function stopOf(wizard: WorkerWizardView | undefined) {
     ? wizard.steps.find((s) => s.state === "blocked")
     : undefined;
 }
+/**
+ * C-839: a paired device's init script creates the account and layout
+ * itself, so the manual target-machine commands are shown only once that
+ * script has finished and the checks still stop at a target-machine step.
+ */
+function commandsShown(wizard: WorkerWizardView): boolean {
+  if (!wizard.device_init) return true;
+  const stop = stopOf(wizard);
+  return (
+    wizard.device_init.state === "succeeded" &&
+    stop !== undefined &&
+    isTargetStep(stop)
+  );
+}
 /** The step bar's index of the checks, shown failed until they pass. */
 const CHECKS_STEP = 2;
 /** The step bar's index of the target-machine commands (optional). */
@@ -1032,7 +1046,9 @@ export function WorkerWizardDrawer({
             ) : (
               <>
                 <Steps wizard={content} onCopy={(key) => void copy(key)} />
-                <Commands wizard={content} onCopy={(key) => void copy(key)} />
+                {commandsShown(content) && (
+                  <Commands wizard={content} onCopy={(key) => void copy(key)} />
+                )}
                 {(content.phase === "passed" ||
                   content.phase === "enabled") && (
                   <HealthReport wizard={content} />

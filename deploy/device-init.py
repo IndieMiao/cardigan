@@ -40,7 +40,11 @@ import tempfile
 PLAN = None  # @plan
 FILES = None  # @files
 
+# C-839: the work root and HOME need room to work in; the config and sudoers
+# directories only take a few KB, and SteamOS keeps `/` read-only with under
+# 1 GiB free, so nothing is required of a partition this script does not use.
 MIN_FREE = 1 << 30
+CONFIG_FREE = 16 << 20
 TIMEOUT_MS = 15000
 PROJECT = re.compile(r'[A-Za-z0-9_][A-Za-z0-9._-]{0,63}')
 ACCOUNT = re.compile(r'cg_[a-z0-9_]{1,26}')
@@ -290,13 +294,37 @@ def preflight(plan):
     if not problems:
         try:
             mount = mount_of(system, at(os.path.dirname(p['parent'])))
-            for path in ('/', mount):
-                space = os.statvfs(at(path))
-                if space.f_bavail * space.f_frsize < MIN_FREE:
-                    problems.append('%s 可用空间不足 1 GiB' % path)
         except (OSError, Failed) as error:
             problems.append('无法读取工作根所在的卷：%s' % error)
+        else:
+            problems.extend(space_problems(system, mount))
     return problems
+
+
+def free_bytes(path):
+    space = os.statvfs(path)
+    return space.f_bavail * space.f_frsize
+
+
+def space_problems(system, mount):
+    """C-839: free space where this script and the worker write, not `/`."""
+    needs = {}
+    for path, minimum in ((mount, MIN_FREE), (HOME_PARENT[system], MIN_FREE),
+                          (os.path.dirname(CONFIG_DIR[system]), CONFIG_FREE), (SUDOERS_DIR[system], CONFIG_FREE)):
+        if os.path.isdir(at(path)):
+            needs[path] = max(minimum, needs.get(path, 0))
+    problems = []
+    for path, minimum in needs.items():
+        try:
+            if free_bytes(at(path)) < minimum:
+                problems.append('%s 可用空间不足 %s' % (path, size(minimum)))
+        except OSError as error:
+            problems.append('无法读取 %s 的可用空间：%s' % (path, error))
+    return problems
+
+
+def size(n):
+    return '%d GiB' % (n >> 30) if n >= 1 << 30 and n % (1 << 30) == 0 else '%d MiB' % max(1, n >> 20)
 
 
 def initialise(plan, files, created):
@@ -363,7 +391,7 @@ def initialise(plan, files, created):
     write_new(p['binding'], json.dumps({
         'account': a, 'uid': uid, 'project': plan['project'], 'root': work,
         'mount': mount, 'volume': str(os.statvfs(at(mount)).f_fsid),
-        'minimum_free_bytes': {'root': MIN_FREE, 'work': MIN_FREE},
+        'minimum_free_bytes': {'root': CONFIG_FREE, 'work': MIN_FREE},
         'timeout_ms': TIMEOUT_MS,
     }).encode(), 0, 0o600)
     install_layout(system, plan['project'], files)

@@ -346,11 +346,15 @@ def post(origin, path, body):
 
 
 def ask(prompt):
-    """A line typed on the terminal, or None without one."""
+    """A line typed on the terminal, or None without one.
+
+    C-839: a terminal is not seekable, so a text-mode "r+" open of /dev/tty
+    fails (io.UnsupportedOperation) and was read as "no terminal"; reading
+    and writing use separate one-way opens instead."""
     try:
-        with open("/dev/tty", "r+", encoding="utf-8") as tty:
-            tty.write(prompt)
-            tty.flush()
+        with open("/dev/tty", "w", encoding="utf-8") as out, open("/dev/tty", encoding="utf-8") as tty:
+            out.write(prompt)
+            out.flush()
             return tty.readline().strip().lower()
     except OSError:
         return None
