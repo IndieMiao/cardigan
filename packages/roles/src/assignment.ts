@@ -63,6 +63,18 @@ const ADB_EMULATOR_RULE =
 // C-813: a Run holding a device may use it; the device rules say how.
 const ADB_DEVICE_SLOT_RULE =
   "本次 Run 有自己的 adb 服务端口（ANDROID_ADB_SERVER_PORT）。adb 只用这个端口，不要用 -P 指定别的端口或默认 5037；Run 结束时系统会关闭它。";
+/**
+ * C-844: PATH without the Android SDK's `emulator` directories (the
+ * `emulator` launcher and its qemu binaries live only there); every other
+ * entry, platform-tools and build-tools included, keeps its order.
+ */
+export function pathWithoutEmulator(path: string): string {
+  return path
+    .split(":")
+    .filter((entry) => !/(?:^|\/)emulator\/*$/u.test(entry))
+    .join(":");
+}
+
 export function compileAssignmentLaunch(
   input: CompileAssignmentInput,
 ): CompiledAssignmentLaunch {
@@ -338,6 +350,8 @@ export function compileAssignmentLaunch(
     // C-813: whether the Run's adb server may claim USB is the host's call.
     if (key === "ADB_USB" && (input.device_session || input.adb_slot?.usb_off))
       continue;
+    // C-844: a Run without an emulator gets no AVD directory.
+    if (key === "ANDROID_AVD_HOME" && input.no_emulator) continue;
     if (
       Object.hasOwn(env, key) ||
       Object.hasOwn(resolved.provider?.definition.env ?? {}, key) ||
@@ -345,6 +359,13 @@ export function compileAssignmentLaunch(
     )
       throw new Error("Worker environment conflicts with launch profile");
     env[key] = value;
+  }
+  if (input.no_emulator) {
+    // C-844: an existing directory without `<name>.ini` files; the emulator
+    // falls back to ~/.android/avd only when ANDROID_AVD_HOME is not a directory.
+    env.ANDROID_AVD_HOME = input.run_dir;
+    if (input.no_emulator.path !== undefined)
+      env.PATH = pathWithoutEmulator(input.no_emulator.path);
   }
   const secretsFile = join(input.run_dir, SECRETS_FILE_NAME);
   const secretsFiles: CompiledFile[] =

@@ -8,7 +8,10 @@ import {
   type RunId,
 } from "@cardigan/domain";
 import {
+  EMULATOR_RESOURCE,
+  emulatorInstances,
   GithubDispatchJournal,
+  listUnregisteredEmulators,
   type MergeGateConfiguration,
   machineRunCapacity,
   RESERVATION_SOURCE_LABELS,
@@ -73,6 +76,13 @@ export function executionCapacityInputs(store: Store, now: string): string {
         )
         .all()
         .map((row) => [row.machine_id, row.doc]),
+      // C-844: emulator processes the adb sweep found outside any Run's slot.
+      db
+        .prepare(
+          "SELECT machine, project, pid, started, stop_reason, stop_failed_at FROM machine_unregistered_emulators ORDER BY machine, project, pid, started",
+        )
+        .all()
+        .map((row) => Object.values(row)),
       // Includes owner liveness: a dead check process releases its slot.
       [...runningMergeChecks(store)].sort(([a], [b]) => a.localeCompare(b)),
       store.listProjects().map((project) => project.id),
@@ -257,6 +267,15 @@ function leaseDetails(
     }
     return `${key}：${row.run_id && tx.runs.get(String(row.project), row.run_id as RunId)?.status === "running" ? "已占用" : "等待释放核验"}`;
   });
+  // C-844: counted per holder project, never with ports, PIDs or Runs.
+  const strays = new Map<string, typeof unregistered>();
+  const unregistered = listUnregisteredEmulators(store.database, { machine });
+  for (const e of unregistered)
+    strays.set(e.project, [...(strays.get(e.project) ?? []), e]);
+  for (const [holder, rows] of strays)
+    details.push(
+      `${EMULATOR_RESOURCE}：未登记的模拟器 ${emulatorInstances(rows)} 个（${holder === project ? "本项目" : `项目 ${holder}`}${rows.some((e) => e.stop_failed_at) ? "，停止失败" : ""}）`,
+    );
   if (project)
     for (const row of store.database
       .prepare(

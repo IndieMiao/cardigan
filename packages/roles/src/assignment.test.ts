@@ -27,6 +27,7 @@ import {
   MCP_BRIDGE_SOURCE,
   mcpBridgeArgs,
   parseLaunchConfig,
+  pathWithoutEmulator,
   START_FILE_NAME,
 } from "./index.js";
 
@@ -1372,7 +1373,7 @@ test("C-679 a Run's own adb slot sets its port and emulator; a pinned worker por
   expect(godot.env.ANDROID_ADB_SERVER_PORT).toBe("15102");
   expect(godot.env.CARDIGAN_EMULATOR_PORT).toBeUndefined();
   expect(godot.env.ANDROID_SERIAL).toBe("cardigan-unassigned");
-  expect(surface(godot)).not.toContain("CARDIGAN_EMULATOR_PORT");
+  expect(surface(godot)).not.toContain("-port $CARDIGAN_EMULATOR_PORT");
   const none = compileAssignmentLaunch({ ...input, adb_slot: null });
   expect(none.env.ANDROID_ADB_SERVER_PORT).toBeUndefined();
   expect(none.env.ADB_SERVER_SOCKET).toBe("localfilesystem:/dev/null");
@@ -1380,6 +1381,50 @@ test("C-679 a Run's own adb slot sets its port and emulator; a pinned worker por
   // Machines without slots keep the worker binding unchanged.
   expect(compileAssignmentLaunch(input).env.ANDROID_ADB_SERVER_PORT).toBe(
     "5137",
+  );
+});
+
+test("C-844 a Run without an emulator gets an AVD directory without AVDs and no SDK emulator directory on PATH; SDK and adb stay", () => {
+  const input = {
+    assignment: { assignment_id: "A-1", run_id: "R-1", project_id: "demo" },
+    role: roleFor("codex", "codex-agent", "coder"),
+    launch: launchConfig,
+    mcp: { url: MCP_URL },
+    run_dir: RUN_DIR,
+    work_dir: WORK_DIR,
+    first_prompt: "test",
+    secrets,
+    worker_env: {
+      ANDROID_AVD_HOME: "/home/cg/.android/avd",
+      ANDROID_HOME: "/sdk",
+    },
+  };
+  const path =
+    "/sdk/platform-tools:/sdk/emulator:/sdk/build-tools/35.0.0:/opt/emulator/:/usr/bin:/bin";
+  const denied = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 2, adb_port: 15102 },
+    no_emulator: { path },
+  });
+  expect(denied.env).toMatchObject({
+    ANDROID_AVD_HOME: RUN_DIR,
+    ANDROID_HOME: "/sdk",
+    ANDROID_ADB_SERVER_PORT: "15102",
+    PATH: "/sdk/platform-tools:/sdk/build-tools/35.0.0:/usr/bin:/bin",
+  });
+  // Without a known session PATH only the AVD directory changes.
+  const local = compileAssignmentLaunch({ ...input, no_emulator: {} });
+  expect(local.env.ANDROID_AVD_HOME).toBe(RUN_DIR);
+  expect(local.env.PATH).toBeUndefined();
+  // A Run holding an emulator keeps the binding's AVD directory and PATH.
+  const emulator = compileAssignmentLaunch({
+    ...input,
+    adb_slot: { slot: 1, adb_port: 15101, emulator_port: 5602 },
+  });
+  expect(emulator.env.ANDROID_AVD_HOME).toBe("/home/cg/.android/avd");
+  expect(emulator.env.PATH).toBeUndefined();
+  expect(pathWithoutEmulator("/a/emulator-tools:/emulator:emulator:/b")).toBe(
+    "/a/emulator-tools:/b",
   );
 });
 

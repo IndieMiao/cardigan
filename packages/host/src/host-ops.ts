@@ -83,6 +83,7 @@ import {
   unfinishedBellAttempts,
   writeContextSamples,
 } from "@cardigan/store";
+import { listUnregisteredEmulators } from "./adb-slots.js";
 import { readAttention } from "./attention.js";
 import {
   notifyAutomaticContextResult,
@@ -498,6 +499,11 @@ export class HostOpsService {
           state,
           this.options.scarceResources ?? DEFAULT_SCARCE_RESOURCES,
           this.clock.now(),
+        ),
+        // C-844: emulators of this project's account no Run's slot covers.
+        unregistered_emulators: listUnregisteredEmulators(
+          this.options.store.database,
+          { project: actor.project_id },
         ),
         ...(this.options.upstream
           ? { launch_warnings: launchWarnings(this.options.upstream) }

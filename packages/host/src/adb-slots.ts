@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Assignment, Run } from "@cardigan/domain";
+import type { Assignment, CardId, Run } from "@cardigan/domain";
 import { runOccupiesSlot } from "@cardigan/domain";
 import {
   type ReadRepositories,
@@ -7,7 +7,7 @@ import {
   type StoreTransactionContext,
   unfinishedBellAttempts,
 } from "@cardigan/store";
-import type { AdbProbe } from "./adb-slot-probe.js";
+import type { AdbProbe, EmulatorProcess } from "./adb-slot-probe.js";
 import { DEVICE_PROVIDERS } from "./device-providers.js";
 import type { MachinePolicy } from "./resource-policy.js";
 
@@ -173,6 +173,37 @@ export interface AdbSlotDiagnostic {
 type Config = {
   adbSlots(machine: string): AdbSlotPolicy | undefined;
 };
+/**
+ * C-844: what an unregistered emulator on this machine is up against: the
+ * machine's `android.emulator` slots (none configured counts as 0) and a
+ * calendar reservation of the emulator by another project (the owner
+ * closing it), named by its id.
+ */
+export type EmulatorPolicy = (
+  project: string,
+  machine: string,
+  now: string,
+) => { readonly limit: number; readonly reservation?: string };
+export type EmulatorStopReason = "reserved" | "over_limit";
+/** C-844: an emulator process no Run's slot covers, as host diagnostics show it. */
+export interface UnregisteredEmulator {
+  readonly project: string;
+  readonly machine: string;
+  readonly pid: number;
+  readonly kind: "qemu" | "launcher";
+  readonly port?: number;
+  readonly assignment_id?: string;
+  readonly run_id?: string;
+  readonly first_seen_at: string;
+  readonly last_seen_at: string;
+  /** Why the sweep stops it (it is still running: the stop failed). */
+  readonly stop_reason?: EmulatorStopReason;
+  readonly stop_failed_at?: string;
+}
+const STOP_TEXT: Record<EmulatorStopReason, string> = {
+  reserved: "这台机器的模拟器已被预约关闭",
+  over_limit: "这台机器的模拟器名额已满",
+};
 const RETRY_MS = 30_000,
   RETRY_MAX_MS = 10 * 60_000;
 
@@ -183,6 +214,7 @@ export class AdbSlots {
     private readonly store: Store,
     private readonly config: Config,
     private readonly probe: AdbProbe | undefined,
+    private readonly emulatorPolicy?: EmulatorPolicy,
   ) {}
   /** The machine policy when these resource keys need an adb slot. */
   applies(machine: string, keys: readonly string[]) {
@@ -589,6 +621,17 @@ export class AdbSlots {
         );
       }
     }
+    // C-844: after the slot and legacy ports are closed, what is left running
+    // belongs to no Run.
+    if (reached)
+      await this.unregisteredEmulators(
+        project,
+        machine,
+        p,
+        probe,
+        clock,
+        !!legacy,
+      );
     return reached;
   }
   /**
@@ -656,6 +699,222 @@ export class AdbSlots {
       }
     }
     return false;
+  }
+  /**
+   * C-844: emulator processes of this project's account that no live Run
+   * slot of the project covers (a Run started one without an emulator lease,
+   * or someone did by hand). They are recorded for host diagnostics and the
+   * capacity view; when the machine's emulator is reserved by another
+   * project (closed by the owner) or the machine is over its emulator slots
+   * counting them, they are stopped by PID and the Run's card (when the
+   * process names its Run) is told. No answer from the target: next sweep.
+   */
+  private async unregisteredEmulators(
+    project: string,
+    machine: string,
+    p: AdbSlotPolicy,
+    probe: AdbProbe,
+    clock: () => string,
+    legacy: boolean,
+  ) {
+    const listed = await probe({
+      action: "emulators",
+      project,
+      machine,
+      generation: randomUUID(),
+      adb_ports: [],
+      emulator_ports: [],
+    });
+    if (!listed?.emulators) return;
+    const plan = this.store.uow.read(() => {
+      const live = this.live(machine).filter((r) => r.purpose === "run");
+      const covered = new Set(
+        live
+          .filter((r) => r.project === project && r.emulator && r.emulator_port)
+          .map((r) => r.emulator_port as number),
+      );
+      // A Run holding an emulator slot owns its emulator even on another port.
+      const holders = new Set(
+        live
+          .filter((r) => r.project === project && r.emulator && r.run_id)
+          .map((r) => `${r.assignment_id}.${r.run_id}`),
+      );
+      // Fixed ports a Run from before C-679 may still use are not strays.
+      if (legacy) for (const port of p.legacyEmulatorPorts) covered.add(port);
+      const stray = (listed.emulators ?? []).filter(
+        (e) =>
+          !(e.session && holders.has(e.session)) &&
+          (e.port === undefined || !covered.has(e.port)),
+      );
+      if (!stray.length) return { stray };
+      const policy = this.emulatorPolicy?.(project, machine, clock()) ?? {
+        limit: 0,
+      };
+      const reason: EmulatorStopReason | undefined = policy.reservation
+        ? "reserved"
+        : live.filter((r) => r.emulator).length + emulatorInstances(stray) >
+            policy.limit
+          ? "over_limit"
+          : undefined;
+      return { stray, reason, reservation: policy.reservation };
+    });
+    const stopped =
+      plan.reason && plan.stray.length
+        ? await probe({
+            action: "emulator_stop",
+            project,
+            machine,
+            generation: randomUUID(),
+            adb_ports: [],
+            emulator_ports: [],
+            pids: plan.stray.map((e) => [e.pid, e.started] as const),
+          })
+        : undefined;
+    this.store.uow.run((tx) => {
+      const at = clock();
+      const db = this.store.database;
+      const known = new Map(
+        (
+          db
+            .prepare(
+              "SELECT pid,started,stop_failed_at FROM machine_unregistered_emulators WHERE project=? AND machine=?",
+            )
+            .all(project, machine) as {
+            pid: number;
+            started: string;
+            stop_failed_at: string | null;
+          }[]
+        ).map((r) => [`${r.pid}:${r.started}`, r]),
+      );
+      const gone = !!stopped && stopped.left === 0;
+      const keep = gone ? [] : plan.stray;
+      const kept = new Set(keep.map((e) => `${e.pid}:${e.started}`));
+      for (const key of known.keys())
+        if (!kept.has(key)) {
+          const [pid, started] = [
+            key.slice(0, key.indexOf(":")),
+            key.slice(key.indexOf(":") + 1),
+          ];
+          db.prepare(
+            "DELETE FROM machine_unregistered_emulators WHERE project=? AND machine=? AND pid=? AND started=?",
+          ).run(project, machine, Number(pid), started);
+        }
+      const runs = new Map<string, { assignment: string; card?: string }>();
+      for (const e of plan.stray) {
+        const owner = this.sessionRun(tx, project, e.session);
+        if (owner) runs.set(owner.run, owner);
+      }
+      const failed = !!plan.reason && !gone;
+      for (const e of keep) {
+        const owner = this.sessionRun(tx, project, e.session);
+        const prior = known.get(`${e.pid}:${e.started}`);
+        db.prepare(
+          "INSERT INTO machine_unregistered_emulators (project,machine,pid,started,kind,port,assignment_id,run_id,first_seen_at,last_seen_at,stop_reason,stop_failed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project,machine,pid,started) DO UPDATE SET last_seen_at=excluded.last_seen_at, stop_reason=excluded.stop_reason, stop_failed_at=excluded.stop_failed_at",
+        ).run(
+          project,
+          machine,
+          e.pid,
+          e.started,
+          e.kind,
+          e.port ?? null,
+          owner?.assignment ?? null,
+          owner?.run ?? null,
+          at,
+          at,
+          plan.reason ?? null,
+          failed ? (prior?.stop_failed_at ?? at) : null,
+        );
+      }
+      const fresh = plan.stray.some((e) => !known.has(`${e.pid}:${e.started}`));
+      const newlyFailed =
+        failed &&
+        plan.stray.some(
+          (e) => !known.get(`${e.pid}:${e.started}`)?.stop_failed_at,
+        );
+      if (!(fresh || gone || newlyFailed)) return;
+      // Events name the machine and Runs, never ports or PIDs (C-497).
+      this.event(tx, project, "machine_emulator_unregistered", at, {
+        machine,
+        instances: emulatorInstances(plan.stray),
+        action: gone ? "stopped" : failed ? "stop_failed" : "observed",
+        ...(plan.reason ? { reason: plan.reason } : {}),
+        ...(plan.reservation ? { reservation: plan.reservation } : {}),
+        ...(runs.size ? { run_ids: [...runs.keys()].join(",") } : {}),
+      });
+      if (!gone || !plan.reason) return;
+      const why =
+        plan.reason === "reserved" && plan.reservation
+          ? `${STOP_TEXT.reserved}（预约 ${plan.reservation}）`
+          : STOP_TEXT[plan.reason];
+      for (const [run, owner] of runs)
+        if (owner.card)
+          this.cardNote(
+            tx,
+            project,
+            owner.card,
+            at,
+            {
+              machine,
+              run_id: run,
+              assignment_id: owner.assignment,
+              reason: plan.reason,
+            },
+            `系统巡检在 ${machine} 上发现 ${run}（${owner.assignment}）自己启动的模拟器：这个 Run 没有模拟器租约，${why}，已按进程停掉。环境里没有 CARDIGAN_EMULATOR_PORT 或 CARDIGAN_DEVICE_SERIAL 时不能自己起模拟器；需要设备时请 PM 建要求 android.any 的工作项。`,
+          );
+    });
+  }
+  /** The Run (and its card) an emulator's `CARDIGAN_RESOURCE_SESSION` names, when it is this project's. */
+  private sessionRun(
+    tx: ReadRepositories,
+    project: string,
+    session: string | undefined,
+  ) {
+    if (!session) return;
+    const dot = session.indexOf(".");
+    const assignment = session.slice(0, dot),
+      run = session.slice(dot + 1);
+    const r = tx.runs.get(project, run as Run["id"]);
+    if (!r || r.assignment_id !== assignment) return;
+    const a = tx.assignments.get(project, assignment as Assignment["id"]);
+    const card = a?.work_item_id
+      ? tx.work_items.get(project, a.work_item_id)?.card_id
+      : undefined;
+    return { run, assignment, ...(card ? { card: String(card) } : {}) };
+  }
+  private cardNote(
+    tx: StoreTransactionContext,
+    project: string,
+    card: string,
+    at: string,
+    payload: Record<string, string>,
+    body: string,
+  ) {
+    const cardId = card as CardId;
+    if (!tx.cards.get(project, cardId)) return;
+    const seq = tx.ids.nextEventSequence(project, cardId);
+    tx.events.append(project, {
+      id: tx.ids.nextEventId(),
+      card_id: cardId,
+      seq,
+      actor: { kind: "system", project_id: project },
+      type: "machine_emulator_stopped",
+      created_at: at,
+      payload,
+    });
+    const id = tx.ids.nextTimelineEntryId(project, cardId);
+    tx.timeline.put(project, {
+      id,
+      short_id: id,
+      card_id: cardId,
+      event_seq: seq,
+      type: "system",
+      author: "system",
+      created_at: at,
+      refs: [{ kind: "run", id: payload.run_id as Run["id"] }],
+      mentions: [],
+      retracted: false,
+      body,
+    });
   }
   /** Host diagnostics: every slot of the machine and who holds it. */
   diagnostics(machine: string): AdbSlotDiagnostic[] | undefined {
@@ -738,4 +997,63 @@ export function adbEnvironmentWarnings(
       (w) =>
         `runtime-workers.yaml：${w.project_id} 在 ${w.machine_id} 上仍写死 ANDROID_ADB_SERVER_PORT。该机器已按 Run 分配 adb 端口，启动时忽略这一项，请删除。`,
     );
+}
+
+/**
+ * C-844: running VMs among emulator processes: one per qemu process, plus a
+ * launcher on a console port no listed qemu uses (still starting up).
+ */
+export function emulatorInstances(
+  processes: readonly Pick<EmulatorProcess, "kind" | "port" | "pid">[],
+): number {
+  const keys = new Set<string>();
+  for (const e of processes)
+    if (e.kind === "qemu")
+      keys.add(e.port === undefined ? `pid:${e.pid}` : `port:${e.port}`);
+  for (const e of processes)
+    if (e.kind === "launcher" && e.port !== undefined)
+      keys.add(`port:${e.port}`);
+  return keys.size || (processes.length ? 1 : 0);
+}
+
+/** C-844: the latest unregistered emulators the sweep saw, oldest first. */
+export function listUnregisteredEmulators(
+  db: Store["database"],
+  filter: { readonly project?: string; readonly machine?: string } = {},
+): UnregisteredEmulator[] {
+  const where: string[] = [],
+    args: string[] = [];
+  if (filter.project !== undefined) {
+    where.push("project=?");
+    args.push(filter.project);
+  }
+  if (filter.machine !== undefined) {
+    where.push("machine=?");
+    args.push(filter.machine);
+  }
+  return (
+    db
+      .prepare(
+        `SELECT * FROM machine_unregistered_emulators${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY machine,project,first_seen_at,pid`,
+      )
+      .all(...args) as Record<string, unknown>[]
+  ).map((r) => ({
+    project: String(r.project),
+    machine: String(r.machine),
+    pid: Number(r.pid),
+    kind: r.kind === "qemu" ? "qemu" : "launcher",
+    ...(r.port === null ? {} : { port: Number(r.port) }),
+    ...(r.assignment_id === null
+      ? {}
+      : { assignment_id: String(r.assignment_id) }),
+    ...(r.run_id === null ? {} : { run_id: String(r.run_id) }),
+    first_seen_at: String(r.first_seen_at),
+    last_seen_at: String(r.last_seen_at),
+    ...(r.stop_reason === "reserved" || r.stop_reason === "over_limit"
+      ? { stop_reason: r.stop_reason }
+      : {}),
+    ...(r.stop_failed_at === null
+      ? {}
+      : { stop_failed_at: String(r.stop_failed_at) }),
+  }));
 }

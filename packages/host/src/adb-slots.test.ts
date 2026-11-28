@@ -17,7 +17,10 @@ import {
   type AdbProbeContext,
   adbTargetProbe,
 } from "./adb-slot-probe.js";
-import { adbEnvironmentWarnings } from "./adb-slots.js";
+import {
+  adbEnvironmentWarnings,
+  listUnregisteredEmulators,
+} from "./adb-slots.js";
 import { launchDevices } from "./launch.js";
 import { MachineLeases } from "./resource-leases.js";
 import { type ResourceProbe, targetProbe } from "./resource-probe.js";
@@ -1010,3 +1013,295 @@ test("C-833: holder candidates name each live slot's session, the legacy ports' 
     { port: 5037, kind: "other", sessions: [] },
   ]);
 });
+
+// ---- C-844: emulators outside any Run's slot -------------------------------
+
+test("C-844: only a Run holding an emulator may start one; elsewhere the launch gets no AVD", async () => {
+  const l = new MachineLeases(store, await config(), fakeProbe().probe);
+  const emulator = await claim(l, 1, ["android.emulator"]);
+  const godot = await claim(l, 2, ["godot"]);
+  const none = needs(3, []);
+  expect(
+    launchDevices(l, "first", "local", emulator.run.id, at).no_emulator,
+  ).toBeUndefined();
+  expect(launchDevices(l, "first", "local", godot.run.id, at)).toMatchObject({
+    adb_slot: { slot: 1 },
+    no_emulator: {},
+  });
+  expect(
+    launchDevices(l, "first", "local", none.run.id, at).no_emulator,
+  ).toEqual({});
+  // A machine without adb slots goes by the claimed resource keys.
+  const unmanaged = new MachineLeases(
+    store,
+    await config(undefined, { adb_slots: undefined }),
+    fakeProbe().probe,
+  );
+  setStatus(none.run, { resource_keys: ["android.any", "android.emulator"] });
+  expect(
+    launchDevices(unmanaged, "first", "local", none.run.id, at).no_emulator,
+  ).toBeUndefined();
+  setStatus(none.run, { resource_keys: ["other"] });
+  expect(
+    launchDevices(unmanaged, "first", "local", none.run.id, at).no_emulator,
+  ).toEqual({});
+  // No machine leases at all: nothing is managed, nothing is taken away.
+  expect(launchDevices(undefined, "first", "local", none.run.id, at)).toEqual(
+    {},
+  );
+});
+
+type Listed = NonNullable<Awaited<ReturnType<AdbProbe>>>["emulators"];
+function emulatorProbe(list: () => Listed) {
+  const stops: AdbProbeContext[] = [];
+  const adb = vi.fn<AdbProbe>(async (c) => {
+    if (c.action === "emulators")
+      return { target: "target-1", found: 0, left: 0, emulators: list() };
+    if (c.action === "emulator_stop") {
+      stops.push(c);
+      return { target: "target-1", found: c.pids?.length ?? 0, left: 0 };
+    }
+    return { target: "target-1", found: 0, left: 0 };
+  });
+  const probe = Object.assign(
+    vi.fn(async () => "target-1"),
+    { adb },
+  ) as unknown as ResourceProbe;
+  return { probe, adb, stops };
+}
+const timeline = (card = "C-1") =>
+  store.uow.read((tx) => tx.timeline.list("first", card as never));
+
+test("C-844: the sweep records emulators no Run's slot covers and stops them once the machine is over its emulator slots", async () => {
+  const card = fixture().cards[0];
+  if (!card) throw new Error("missing card");
+  store.uow.run((tx) => tx.cards.put("first", card));
+  let running: Listed = [];
+  const { probe, stops } = emulatorProbe(() => running);
+  const l = new MachineLeases(
+    store,
+    await config({ ...slots, sweep_minutes: 5 }),
+    probe,
+  );
+  const leased = await claim(l, 1, ["android.emulator"]);
+  const godot = await claim(l, 2, ["godot"]);
+  running = [
+    // The emulator Run's own, on its slot's console port.
+    { pid: 101, started: "11", kind: "qemu", port: 5600 },
+    // Also its own, though started on the default port: it names its Run.
+    {
+      pid: 102,
+      started: "12",
+      kind: "qemu",
+      port: 5556,
+      session: `${leased.owner.id}.${leased.run.id}`,
+    },
+    // The godot Run started one itself, on the default port.
+    {
+      pid: 202,
+      started: "22",
+      kind: "qemu",
+      port: 5554,
+      session: `${godot.owner.id}.${godot.run.id}`,
+    },
+    { pid: 203, started: "23", kind: "launcher", port: 5554 },
+  ];
+  await l.adb.reconcile("first", () => at);
+  // One leased emulator plus one stray fits the 2 emulator slots: shown, kept.
+  expect(stops).toEqual([]);
+  expect(listUnregisteredEmulators(store.database)).toEqual([
+    expect.objectContaining({
+      project: "first",
+      machine: "local",
+      pid: 202,
+      kind: "qemu",
+      port: 5554,
+      assignment_id: godot.owner.id,
+      run_id: godot.run.id,
+      first_seen_at: at,
+    }),
+    expect.objectContaining({ pid: 203, kind: "launcher" }),
+  ]);
+  expect(events("machine_emulator_unregistered")).toEqual([
+    expect.objectContaining({
+      payload: {
+        machine: "local",
+        instances: 1,
+        action: "observed",
+        run_ids: godot.run.id,
+      },
+    }),
+  ]);
+  // The next sweep sees the same processes: no new event.
+  await l.adb.reconcile("first", () => later(5 * 60_000));
+  expect(events("machine_emulator_unregistered")).toHaveLength(1);
+  expect(listUnregisteredEmulators(store.database)[0]?.last_seen_at).toBe(
+    later(5 * 60_000),
+  );
+  // A second emulator Run takes the last slot: the stray is over the limit.
+  const second = await claim(l, 3, ["android.emulator"]);
+  expect(second.access?.adb?.emulator_port).toBe(5604);
+  await l.adb.reconcile("first", () => later(10 * 60_000));
+  expect(stops).toHaveLength(1);
+  expect(stops[0]?.pids).toEqual([
+    [202, "22"],
+    [203, "23"],
+  ]);
+  expect(listUnregisteredEmulators(store.database)).toEqual([]);
+  expect(events("machine_emulator_unregistered").at(-1)?.payload).toEqual({
+    machine: "local",
+    instances: 1,
+    action: "stopped",
+    reason: "over_limit",
+    run_ids: godot.run.id,
+  });
+  // The godot Run's card is told, without ports or PIDs.
+  const note = timeline().find((t) => t.body.includes("自己启动的模拟器"));
+  expect(note?.body).toContain(godot.run.id);
+  expect(note?.body).toContain("名额已满");
+  expect(note?.body).toContain("android.any");
+  expect(note?.body).not.toMatch(/5554|202/u);
+});
+
+test("C-844: on a machine whose emulator another project reserved, any stray emulator is stopped at once; an unanswered stop keeps it listed", async () => {
+  const listed: Listed = [{ pid: 7, started: "70", kind: "qemu" }];
+  let answer = false;
+  const stops: AdbProbeContext[] = [];
+  const adb = vi.fn<AdbProbe>(async (c) => {
+    if (c.action === "emulators")
+      return { target: "target-1", found: 1, left: 0, emulators: listed };
+    if (c.action === "emulator_stop") {
+      stops.push(c);
+      return answer ? { target: "target-1", found: 1, left: 0 } : undefined;
+    }
+    return { target: "target-1", found: 0, left: 0 };
+  });
+  const probe = Object.assign(
+    vi.fn(async () => "target-1"),
+    {
+      adb,
+    },
+  ) as unknown as ResourceProbe;
+  const l = new MachineLeases(
+    store,
+    await config({ ...slots, sweep_minutes: 5 }),
+    probe,
+  );
+  const reservation = await l.reserve(
+    { kind: "human", project_id: "second" },
+    "local",
+    "android.emulator",
+    later(-60_000),
+    later(3600_000),
+    () => later(-120_000),
+  );
+  await l.adb.reconcile("first", () => at);
+  expect(stops).toHaveLength(1);
+  expect(listUnregisteredEmulators(store.database)).toEqual([
+    expect.objectContaining({
+      pid: 7,
+      stop_reason: "reserved",
+      stop_failed_at: at,
+    }),
+  ]);
+  expect(events("machine_emulator_unregistered").at(-1)?.payload).toEqual({
+    machine: "local",
+    instances: 1,
+    action: "stop_failed",
+    reason: "reserved",
+    reservation: expect.any(String),
+  });
+  expect(reservation).toBeDefined();
+  answer = true;
+  await l.adb.reconcile("first", () => later(5 * 60_000));
+  expect(stops).toHaveLength(2);
+  expect(listUnregisteredEmulators(store.database)).toEqual([]);
+  expect(events("machine_emulator_unregistered").at(-1)?.payload).toMatchObject(
+    { action: "stopped", reason: "reserved" },
+  );
+  // The holder project's own emulators are not closed by its reservation.
+  expect(events("machine_emulator_unregistered", "second")).toEqual([]);
+});
+
+test("C-844: the real script lists this account's emulator processes with their console port and Run, and stops exactly the named ones", async () => {
+  if (platform() !== "linux") return;
+  const probe = targetProbe(() => ({ mode: "local", dataDir: dir }));
+  const adb = probe.adb as AdbProbe;
+  const fake = (argv0: string, args: string[], env: NodeJS.ProcessEnv = {}) =>
+    spawn(
+      "/usr/bin/python3",
+      [
+        "-c",
+        `import os,sys; os.execv('/usr/bin/python3', [${JSON.stringify(argv0)}, '-c', 'import time; time.sleep(60)', ${args.map((a) => JSON.stringify(a)).join(",")}])`,
+      ],
+      { env: { PATH: "/usr/bin:/bin", ...env }, stdio: "ignore" },
+    );
+  const qemu = fake(
+    "qemu-system-x86_64-headless",
+    ["-avd", "X", "-port", "5554"],
+    {
+      CARDIGAN_RESOURCE_SESSION: "A-9.R-99",
+    },
+  );
+  const launcher = fake("/opt/sdk/emulator/emulator", ["-ports", "5602,5603"]);
+  const other = fake("qemu-img", ["-port", "5556"]);
+  children.push(qemu, launcher, other);
+  const context = {
+    project: "first",
+    machine: "local",
+    generation: "g-1",
+    adb_ports: [],
+    emulator_ports: [],
+  };
+  let found: Listed = [];
+  for (let i = 0; i < 50; i++) {
+    found = (await adb({ ...context, action: "emulators" }))?.emulators;
+    if (
+      (found ?? []).filter((e) => e.pid === qemu.pid || e.pid === launcher.pid)
+        .length === 2
+    )
+      break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const mine = (found ?? [])
+    .filter(
+      (e) =>
+        e.pid === qemu.pid || e.pid === launcher.pid || e.pid === other.pid,
+    )
+    .sort((a, b) => a.pid - b.pid);
+  expect(mine).toEqual(
+    [
+      expect.objectContaining({
+        pid: qemu.pid,
+        kind: "qemu",
+        port: 5554,
+        session: "A-9.R-99",
+      }),
+      expect.objectContaining({
+        pid: launcher.pid,
+        kind: "launcher",
+        port: 5602,
+      }),
+    ].sort((a, b) => (a.pid ?? 0) - (b.pid ?? 0)),
+  );
+  const target = mine.find((e) => e.pid === qemu.pid);
+  if (!target) throw new Error("missing qemu stand-in");
+  // A stale start stamp (a reused PID) is never signalled.
+  expect(
+    await adb({
+      ...context,
+      action: "emulator_stop",
+      pids: [[launcher.pid ?? 0, "0"]],
+    }),
+  ).toEqual({ target: "local", found: 0, left: 0 });
+  expect(
+    await adb({
+      ...context,
+      action: "emulator_stop",
+      pids: [[target.pid, target.started]],
+    }),
+  ).toEqual({ target: "local", found: 1, left: 0 });
+  const after = (await adb({ ...context, action: "emulators" }))?.emulators;
+  expect(after?.some((e) => e.pid === qemu.pid)).toBe(false);
+  expect(after?.some((e) => e.pid === launcher.pid)).toBe(true);
+}, 20_000);

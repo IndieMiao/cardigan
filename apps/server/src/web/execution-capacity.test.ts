@@ -433,3 +433,39 @@ test("C-634 counted capacity inputs follow active leases at the read time and ru
     store.close();
   }
 });
+
+test("C-844 an emulator outside any Run's slot shows on its machine as unregistered, by project, without ports or PIDs", () => {
+  const store = Store.open({ dbPath: ":memory:" });
+  try {
+    for (const id of ["first", "second"]) store.createProject({ id });
+    const now = "2032-01-01T00:00:00.000Z";
+    const before = executionCapacityInputs(store, now);
+    const insert = store.database.prepare(
+      "INSERT INTO machine_unregistered_emulators (project,machine,pid,started,kind,port,first_seen_at,last_seen_at,stop_failed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+    );
+    insert.run("first", "local", 4242, "1", "qemu", 5554, now, now, null);
+    insert.run("first", "local", 4243, "1", "launcher", 5554, now, now, null);
+    expect(executionCapacityInputs(store, now)).not.toBe(before);
+    const view = (project: string) =>
+      executionCapacity(
+        store,
+        () => 4,
+        undefined,
+        () => 24,
+        undefined,
+        undefined,
+        project,
+        now,
+      ).agents.find((a) => a.machine_id === "local")?.lease_details;
+    expect(view("first")).toEqual([
+      "android.emulator：未登记的模拟器 1 个（本项目）",
+    ]);
+    insert.run("first", "local", 4300, "2", "qemu", null, now, now, now);
+    expect(view("second")).toEqual([
+      "android.emulator：未登记的模拟器 2 个（项目 first，停止失败）",
+    ]);
+    expect(JSON.stringify(view("second"))).not.toMatch(/4242|5554/u);
+  } finally {
+    store.close();
+  }
+});

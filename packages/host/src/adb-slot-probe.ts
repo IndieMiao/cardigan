@@ -25,7 +25,7 @@ import {
  * pass restarts it with that account's adb keys. `found` counts restarted
  * servers, `left` those still holding USB or not back.
  */
-export const ADB_SLOT_SCRIPT = `import json,os,pwd,shutil,socket,subprocess,sys,time
+export const ADB_SLOT_SCRIPT = `import json,os,pwd,re,shutil,signal,socket,subprocess,sys,time
 c=json.loads(sys.argv[1])
 adb=[p for p in c.get('adb_ports',[]) if isinstance(p,int)]
 emu=[p for p in c.get('emulator_ports',[]) if isinstance(p,int)]
@@ -170,8 +170,82 @@ def usb_off():
   r['reconnected']+=sum(1 for s in others if s in now)
   r['missing']+=sum(1 for s in others if s not in now)
  print(json.dumps(r),flush=True)
+SESSION=re.compile(r'A-[0-9]{1,12}\\.R-[0-9]{1,12}')
+def emu_kind(a):
+ n=os.path.basename(a)
+ if n.startswith('qemu-system-'): return 'qemu'
+ if n=='emulator' or (n.startswith('emulator64-') and n!='emulator64-crash-service'): return 'launcher'
+def emu_port(argv):
+ for i,a in enumerate(argv[:-1]):
+  if a in ('-port','-ports'):
+   v=argv[i+1].split(',')[0]
+   if v.isdigit() and 0<int(v)<65536: return int(v)
+def emu_procs():
+ uid=os.getuid(); out=[]
+ if sys.platform.startswith('linux'):
+  for d in os.listdir('/proc'):
+   if not d.isdigit() or int(d)==os.getpid(): continue
+   try:
+    if os.stat('/proc/'+d).st_uid!=uid: continue
+    with open('/proc/%s/cmdline'%d,'rb') as f: argv=[a.decode('utf-8','replace') for a in f.read(65536).split(b'\\0') if a]
+    if not argv or not emu_kind(argv[0]): continue
+    with open('/proc/%s/stat'%d,'rb') as f: start=f.read(4096).rsplit(b')',1)[1].split()[19].decode()
+   except (OSError,IndexError,ValueError):
+    continue
+   session=None
+   try:
+    with open('/proc/%s/environ'%d,'rb') as f:
+     for e in f.read(262144).split(b'\\0'):
+      if e.startswith(b'CARDIGAN_RESOURCE_SESSION='):
+       v=e[26:].decode('ascii','replace')
+       if SESSION.fullmatch(v): session=v
+   except OSError:
+    pass
+   out.append((int(d),start,argv,session))
+  return out
+ try:
+  o=subprocess.run(['/bin/ps','-ww','-U',str(uid),'-o','pid=,lstart=,command='],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=3,text=True).stdout
+ except (OSError,subprocess.SubprocessError):
+  return None
+ for l in o.splitlines():
+  x=l.split()
+  if len(x)<7 or not x[0].isdigit() or not emu_kind(x[6]): continue
+  out.append((int(x[0]),' '.join(x[1:6]),x[6:],None))
+ return out
+def emulators():
+ found=emu_procs()
+ if found is None:
+  return
+ rows=[[p,s,emu_kind(a[0]),emu_port(a),n] for p,s,a,n in found][:16]
+ print(json.dumps(dict(generation=c.get('generation'),found=len(rows),left=0,emulators=rows)),flush=True)
+def emulator_stop():
+ want=set()
+ for x in c.get('pids',[]):
+  if isinstance(x,list) and len(x)==2 and isinstance(x[0],int) and isinstance(x[1],str): want.add((x[0],x[1]))
+ def live():
+  f=emu_procs()
+  return None if f is None else [p for p,s,a,n in f if (p,s) in want]
+ hit=live()
+ if hit is None: return
+ left=hit
+ for sig,wait in ((signal.SIGTERM,5.0),(signal.SIGKILL,2.0)):
+  for p in left:
+   try:
+    os.kill(p,sig)
+   except OSError:
+    pass
+  end=time.monotonic()+wait
+  while True:
+   now=live()
+   left=left if now is None else now
+   if not left or time.monotonic()>=end: break
+   time.sleep(0.2)
+  if not left: break
+ print(json.dumps(dict(generation=c.get('generation'),found=len(hit),left=len(left))),flush=True)
 if c.get('action')=='usb_off':
  usb_off(); sys.exit(0)
+if c.get('action') in ('emulators','emulator_stop'):
+ (emulators if c['action']=='emulators' else emulator_stop)(); sys.exit(0)
 found=sum(1 for p in ports if up(p))
 if c.get('action')=='release' and found:
  for p in emu:
@@ -186,12 +260,30 @@ print(json.dumps({'generation':c.get('generation'),'found':found,'left':left}),f
 
 export type AdbProbeContext = {
   /** C-833 `usb_off`: restart this account's servers on `adb_ports` that hold USB devices with `ADB_USB=0`. */
-  action: "check" | "release" | "usb_off";
+  /**
+   * C-844 `emulators`: list this account's emulator processes (the `emulator`
+   * launcher and `qemu-system-*`); `emulator_stop`: stop `pids` (pid and
+   * start stamp from that list, so a reused PID is never signalled) with
+   * SIGTERM, then SIGKILL. `found`/`left` count the matched and the remaining.
+   */
+  action: "check" | "release" | "usb_off" | "emulators" | "emulator_stop";
   project: string;
   machine: string;
   generation?: string;
   adb_ports: readonly number[];
   emulator_ports: readonly number[];
+  pids?: readonly (readonly [number, string])[];
+};
+/** C-844: one emulator process of the project account on the worker. */
+export type EmulatorProcess = {
+  readonly pid: number;
+  /** Process start stamp (Linux: clock ticks since boot; macOS: `ps lstart`). */
+  readonly started: string;
+  readonly kind: "qemu" | "launcher";
+  /** Console port from `-port` / `-ports`, when given. */
+  readonly port?: number;
+  /** `CARDIGAN_RESOURCE_SESSION` (`<Assignment>.<Run>`) in its environment (Linux). */
+  readonly session?: string;
 };
 export type AdbProbeResult = {
   target: string;
@@ -202,6 +294,8 @@ export type AdbProbeResult = {
   /** usb_off: emulator and network connections back on the restarted servers. */
   reconnected?: number;
   missing?: number;
+  /** emulators: the processes found. */
+  emulators?: readonly EmulatorProcess[];
 };
 /** Undefined means the target or its answer could not be established. */
 export type AdbProbe = (
@@ -232,6 +326,40 @@ export async function runOnTarget(
 const count = (v: unknown) =>
   typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
 
+const SESSION = /^A-[0-9]{1,12}\.R-[0-9]{1,12}$/u;
+function emulatorRows(value: unknown): EmulatorProcess[] | undefined {
+  if (!Array.isArray(value) || value.length > 16) return undefined;
+  const rows: EmulatorProcess[] = [];
+  for (const v of value) {
+    if (!Array.isArray(v) || v.length !== 5) return undefined;
+    const [pid, started, kind, port, session] = v as unknown[];
+    if (
+      typeof pid !== "number" ||
+      !Number.isSafeInteger(pid) ||
+      pid <= 0 ||
+      typeof started !== "string" ||
+      !/^[A-Za-z0-9: ]{1,40}$/u.test(started) ||
+      (kind !== "qemu" && kind !== "launcher") ||
+      (port !== null &&
+        (typeof port !== "number" ||
+          !Number.isSafeInteger(port) ||
+          port <= 0 ||
+          port > 65535)) ||
+      (session !== null &&
+        (typeof session !== "string" || !SESSION.test(session)))
+    )
+      return undefined;
+    rows.push({
+      pid,
+      started,
+      kind,
+      ...(port === null ? {} : { port }),
+      ...(session === null ? {} : { session }),
+    });
+  }
+  return rows;
+}
+
 export function adbTargetProbe(
   resolve: (
     context: { project: string; machine: string },
@@ -256,6 +384,12 @@ export function adbTargetProbe(
       if (found === undefined || left === undefined) return undefined;
       if (context.action !== "check" && row.generation !== context.generation)
         return undefined;
+      if (context.action === "emulators") {
+        const emulators = emulatorRows(row.emulators);
+        return emulators
+          ? { target: resolved.target, found, left, emulators }
+          : undefined;
+      }
       if (context.action !== "usb_off")
         return { target: resolved.target, found, left };
       const foreign = count(row.foreign),
