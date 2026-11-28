@@ -1,9 +1,11 @@
 import {
   type CheckHeadReader,
+  type ClaimedDeliveryRejection,
   type Clock,
   type CommandState,
   type DeliveryId,
   type DeliveryVerifier,
+  type DomainError,
   type ProjectId,
   prepareCheck,
   prepareDelivery,
@@ -19,9 +21,16 @@ import {
   withdrawReview,
 } from "@cardigan/domain";
 import { z } from "zod";
+import { toDomainError } from "../errors.js";
 import type { Logger } from "../log.js";
-import { defineTool } from "../tools/types.js";
+import { defineTool, type ToolContext } from "../tools/types.js";
+import {
+  claimRejection,
+  recordRejection,
+  rejectionKey,
+} from "./delivery-rejections.js";
 import { executeCommand, executePreparedCommand, unwrap } from "./execute.js";
+import { InFlightCalls, inFlightKey, settleWithin } from "./in-flight.js";
 
 import { id, idempotency_key, plainSummary } from "./schemas.js";
 
@@ -223,12 +232,126 @@ export interface DeliveryToolOptions {
   readonly pinDelivery?: (request: PinDeliveryRequest) => Promise<void>;
   readonly clock?: Clock;
   readonly log?: Logger;
+  /**
+   * C-847: how long submit_delivery waits for verification before answering
+   * "processing" while it continues; defaults to {@link DELIVERY_REPLY_WITHIN_MS}.
+   */
+  readonly deliveryReplyWithinMs?: number;
+}
+/**
+ * C-847: well under half of the shortest client tool timeout in use (Codex's
+ * default 60 s; Claude Code's default is far longer, the Codex stdio bridge
+ * allows 300 s), so a slow verification is answered before any client gives up.
+ */
+export const DELIVERY_REPLY_WITHIN_MS = 20_000;
+const RETRY_AFTER_SECONDS = 15;
+export const SUBMIT_DELIVERY_DESCRIPTION =
+  "Submit a versioned delivery or card completion request. 大仓库的 Git 校验可能要一两分钟：约 20 秒内没校验完时返回 status=processing（尚未登记，服务端继续校验）。收到 processing 或客户端超时后，先等约 15 秒，再用同一 idempotency_key 和完全相同的参数重提 submit_delivery 取最终结果：成功时返回已登记的交付（不重复校验），失败时返回服务端的原始报错（details.replayed=true，只回放一次，结果也会写进卡片时间线，可用 get_updates 查看）。按报错修正后再提交。等待期间不要 report_blocker、finish_run 或改动工作项，否则结果会因状态已变被拒。";
+
+/** Not registered yet: the same call again returns the outcome. */
+function deliveryProcessing(idempotency_key: string, waitedMs: number) {
+  return {
+    status: "processing" as const,
+    delivered: false,
+    idempotency_key,
+    waited_seconds: Math.round(waitedMs / 1000),
+    retry_after_seconds: RETRY_AFTER_SECONDS,
+    message: `交付仍在校验，尚未登记。约 ${RETRY_AFTER_SECONDS} 秒后用同一 idempotency_key 和完全相同的参数再调用 submit_delivery 取结果；不要因此 report_blocker、finish_run 或改动工作项。`,
+  };
 }
 export function deliveryTools(options: DeliveryToolOptions) {
   const configured = (state: CommandState): CommandState => ({
     ...state,
     project_settings: options.projectSettings?.(state.project_id) ?? {},
   });
+  const inFlight = new InFlightCalls();
+  /** Per running call: whether a caller received its outcome directly. */
+  const watched = new WeakMap<
+    Promise<unknown>,
+    { received: boolean; background?: boolean }
+  >();
+  /** Replayed failures are already recorded; never record them again. */
+  const replays = new WeakSet<object>();
+  const clock = options.clock ?? { now: () => new Date().toISOString() };
+  const replayedRejection = (claimed: ClaimedDeliveryRejection) => {
+    const error: DomainError = {
+      ...claimed.error,
+      details: {
+        ...(claimed.error.details ?? {}),
+        replayed: true,
+        settled_at: claimed.settled_at,
+      },
+    };
+    replays.add(error);
+    return error;
+  };
+  const logBackground = (
+    context: ToolContext,
+    code: string,
+    started: number,
+  ) => {
+    try {
+      options.log?.({
+        event: "tool",
+        method: "background",
+        tool: "submit_delivery",
+        assignment_id: context.identity.actor.assignment_id,
+        code,
+        duration_ms: performance.now() - started,
+      });
+    } catch {
+      // A failing log never changes the answer.
+    }
+  };
+  const replyWithinMs =
+    options.deliveryReplyWithinMs ?? DELIVERY_REPLY_WITHIN_MS;
+  /** Verification, the delivery transaction and the pin: one joinable call. */
+  const submit = async (
+    idempotency_key: string,
+    params: SubmitDeliveryParams,
+    context: ToolContext,
+  ) => {
+    const delivery = await executePreparedCommand(
+      context,
+      "submit_delivery",
+      idempotency_key,
+      params,
+      // The request's project selects the verifier, not the token's claim.
+      (state, actor, p) =>
+        prepareDelivery(
+          configured(state),
+          actor,
+          p,
+          options.deliveryVerifier(actor.project_id),
+        ),
+      (state, actor, p, receipt, ports) =>
+        submitDelivery(configured(state), actor, p, unwrap(receipt), ports),
+      options.clock,
+    );
+    if (delivery.subject.kind === "git_head" && options.pinDelivery) {
+      const started = performance.now();
+      try {
+        await options.pinDelivery({
+          project_id: context.identity.actor.project_id,
+          delivery_id: delivery.id,
+          sha: delivery.subject.value,
+        });
+      } catch {
+        // The delivery is already committed: never roll it back. The
+        // reconcile loop repairs a missing pin from the candidate ref.
+        options.log?.({
+          event: "tool",
+          method: "tools/call",
+          tool: "submit_delivery",
+          assignment_id: context.identity.actor.assignment_id,
+          code: "delivery_pin_failed",
+        });
+      } finally {
+        context.recordTiming?.("delivery_pin", performance.now() - started);
+      }
+    }
+    return delivery;
+  };
   return [
     defineTool({
       name: "request_delivery_rework",
@@ -254,49 +377,59 @@ export function deliveryTools(options: DeliveryToolOptions) {
     }),
     defineTool({
       name: "submit_delivery",
-      description: "Submit a versioned delivery or card completion request.",
+      description: SUBMIT_DELIVERY_DESCRIPTION,
       input: deliveryInput,
       handler: async ({ idempotency_key, ...params }, context) => {
-        const delivery = await executePreparedCommand(
-          context,
-          "submit_delivery",
-          idempotency_key,
-          params as SubmitDeliveryParams,
-          // The request's project selects the verifier, not the token's claim.
-          (state, actor, p) =>
-            prepareDelivery(
-              configured(state),
-              actor,
-              p,
-              options.deliveryVerifier(actor.project_id),
-            ),
-          (state, actor, p, receipt, ports) =>
-            submitDelivery(configured(state), actor, p, unwrap(receipt), ports),
-          options.clock,
+        const started = performance.now();
+        const rejection = rejectionKey(context, idempotency_key, params);
+        const call = inFlight.run(
+          inFlightKey(context, "submit_delivery", idempotency_key, params),
+          async () => {
+            // A failure nobody received is the answer to this same call, once.
+            const claimed =
+              rejection && claimRejection(context, rejection, clock);
+            if (claimed) throw replayedRejection(claimed);
+            return submit(
+              idempotency_key,
+              params as SubmitDeliveryParams,
+              context,
+            );
+          },
         );
-        if (delivery.subject.kind === "git_head" && options.pinDelivery) {
-          const started = performance.now();
-          try {
-            await options.pinDelivery({
-              project_id: context.identity.actor.project_id,
-              delivery_id: delivery.id,
-              sha: delivery.subject.value,
-            });
-          } catch {
-            // The delivery is already committed: never roll it back. The
-            // reconcile loop repairs a missing pin from the candidate ref.
-            options.log?.({
-              event: "tool",
-              method: "tools/call",
-              tool: "submit_delivery",
-              assignment_id: context.identity.actor.assignment_id,
-              code: "delivery_pin_failed",
-            });
-          } finally {
-            context.recordTiming?.("delivery_pin", performance.now() - started);
-          }
+        const watch = watched.get(call) ?? { received: false };
+        watched.set(call, watch);
+        let settled: Awaited<ReturnType<typeof settleWithin<unknown>>>;
+        try {
+          settled = await settleWithin(call, replyWithinMs);
+        } catch (error) {
+          watch.received = true;
+          throw error;
         }
-        return delivery;
+        if (settled) {
+          watch.received = true;
+          return settled.value;
+        }
+        // Still verifying: answer now, and settle once in the background.
+        if (!watch.background) {
+          watch.background = true;
+          call.then(
+            () => logBackground(context, "ok", started),
+            async (error: unknown) => {
+              // Let every caller still waiting on this call take it first.
+              await new Promise((resolve) => setImmediate(resolve));
+              const failure = toDomainError(error);
+              logBackground(context, failure.code, started);
+              if (watch.received || replays.has(error as object) || !rejection)
+                return;
+              try {
+                recordRejection(context, rejection, failure, clock);
+              } catch {
+                logBackground(context, "rejection_record_failed", started);
+              }
+            },
+          );
+        }
+        return deliveryProcessing(idempotency_key, replyWithinMs);
       },
     }),
     defineTool({

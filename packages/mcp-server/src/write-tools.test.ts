@@ -3,7 +3,7 @@ import { systemCompleteCard } from "@cardigan/domain";
 import { Store } from "@cardigan/store";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { loadCommandState, persistEffect, unwrap } from "./commands/execute.js";
 import { memoryLogger } from "./log.js";
 import { type RunningServer, startMcpServer } from "./server.js";
@@ -555,7 +555,7 @@ test.each(["state", "token", "reject"])(
   },
 );
 
-test("concurrent identical submissions commit once, and cached replay does not repeat preflight", async () => {
+test("C-847: concurrent identical submissions share one verification and commit once; cached replay does not repeat preflight", async () => {
   let entered = 0;
   let release: () => void = () => {};
   const barrier = new Promise<void>((resolve) => {
@@ -563,17 +563,22 @@ test("concurrent identical submissions commit once, and cached replay does not r
   });
   await restart({
     verify: async () => {
-      if (++entered === 2) release();
+      entered++;
       await barrier;
       return { ok: true, value: [] };
     },
   });
   const a = await connect();
   const b = await connect();
-  const [first, second] = await Promise.all([
+  const both = Promise.all([
     call(a, "submit_delivery", delivery),
     call(b, "submit_delivery", delivery),
   ]);
+  await vi.waitFor(() => expect(entered).toBe(1));
+  // Let the second request arrive while the first is still verifying.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  release();
+  const [first, second] = await both;
   expect(first.isError).not.toBe(true);
   expect(second.structuredContent).toEqual(first.structuredContent);
   expect(counts()).toEqual({
@@ -583,7 +588,7 @@ test("concurrent identical submissions commit once, and cached replay does not r
     timeline: 1,
   });
   await call(a, "submit_delivery", delivery);
-  expect(entered).toBe(2);
+  expect(entered).toBe(1);
 });
 
 test("the request's project selects the verifier, and the pin follows the commit", async () => {

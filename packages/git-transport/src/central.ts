@@ -28,6 +28,7 @@ import {
   type GitCentralPort,
   type GitCommitTreeInput,
   type GitFileDiff,
+  type GitFileDiffOptions,
   type GitMergeTreeOptions,
   type GitPreparedBackup,
   type GitPublicationGuard,
@@ -1259,6 +1260,7 @@ export class CentralGitTransport
     repository: string,
     base: string,
     head: string,
+    options: GitFileDiffOptions = {},
   ): Promise<readonly GitFileDiff[]> {
     await this.requireCommit(repository, base);
     await this.requireCommit(repository, head);
@@ -1286,6 +1288,20 @@ export class CentralGitTransport
         );
       const path = records[i + 1];
       if (!m || !path) throw new Error("Unsupported raw diff");
+      const entry = {
+        path,
+        old_mode: m[1]!,
+        new_mode: m[2]!,
+        old_oid: m[3]!,
+        new_oid: m[4]!,
+        status: m[5]!,
+      };
+      // C-847: three processes per path dominate large deliveries; read
+      // content only where the caller inspects it.
+      if (options.content && !options.content(path)) {
+        result.push({ ...entry, patch: "" });
+        continue;
+      }
       // Literal pathspecs and no converters: repository attributes cannot run code.
       const patch = await this.checked(
         repository,
@@ -1308,7 +1324,7 @@ export class CentralGitTransport
         m[1] === "100644" || m[1] === "100755"
           ? await this.checked(
               repository,
-              ["cat-file", "blob", m[3]!],
+              ["cat-file", "blob", entry.old_oid],
               {},
               true,
             )
@@ -1317,7 +1333,7 @@ export class CentralGitTransport
         m[2] === "100644" || m[2] === "100755"
           ? await this.checked(
               repository,
-              ["cat-file", "blob", m[4]!],
+              ["cat-file", "blob", entry.new_oid],
               {},
               true,
             )
@@ -1325,12 +1341,7 @@ export class CentralGitTransport
       result.push({
         ...(before === undefined ? {} : { before }),
         ...(after === undefined ? {} : { after }),
-        path,
-        old_mode: m[1]!,
-        new_mode: m[2]!,
-        old_oid: m[3]!,
-        new_oid: m[4]!,
-        status: m[5]!,
+        ...entry,
         patch,
       });
     }

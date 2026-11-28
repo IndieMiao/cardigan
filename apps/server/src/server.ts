@@ -487,6 +487,8 @@ async function assembleServer(
         process.stdout.write(`${JSON.stringify(entry)}\n`),
       onSourceLock: (entry) =>
         process.stdout.write(`${JSON.stringify(entry)}\n`),
+      onVerifySteps: (entry) =>
+        process.stdout.write(`${JSON.stringify(entry)}\n`),
       onLockSample: lockMetrics.record,
     });
 

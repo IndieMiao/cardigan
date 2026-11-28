@@ -23,6 +23,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import {
   type DeliverySourceErrorEntry,
   type DeliverySourceLockEntry,
+  type DeliveryVerifyStepsEntry,
   ServerGit,
   type ServerGitOptions,
 } from "./git.js";
@@ -1111,12 +1112,14 @@ test("C-642: delivery and precheck reads hold the project lock only to publish r
   const work = required(repositories.get(key(f.project_id, a.machine_id)));
   const sha = git(work, "rev-parse", "HEAD");
   const entries: DeliverySourceLockEntry[] = [];
+  const steps: DeliveryVerifyStepsEntry[] = [];
   const observed = new ServerGit({
     dataDir,
     store: f.store,
     targets: (service as unknown as { options: ServerGitOptions }).options
       .targets,
     onSourceLock: (entry) => entries.push(entry),
+    onVerifySteps: (entry) => steps.push(entry),
   });
   await observed.baseline(required(observed.projectOf(f.project_id)));
   const marker = join(root, "pack-started"),
@@ -1185,6 +1188,22 @@ test("C-642: delivery and precheck reads hold the project lock only to publish r
     expect(entry.held_ms).toBeGreaterThanOrEqual(0);
     expect(entry.held_ms).toBeLessThan(2000);
   }
+  // C-847: one line per verification, stage names and milliseconds only.
+  expect(steps).toEqual([
+    {
+      event: "delivery_verify_steps",
+      project_id: f.project_id,
+      assignment_id: a.id,
+      steps_ms: {
+        ensure_central: expect.any(Number),
+        commit_checks: expect.any(Number),
+        fetch_tip: expect.any(Number),
+        role_inventory: expect.any(Number),
+        commit_count: expect.any(Number),
+        own_inventory: expect.any(Number),
+      },
+    },
+  ]);
 }, 30000);
 
 test("C-642: a rejected delivery takes the lock only to record the fetched tip, a bad SHA not at all", async () => {

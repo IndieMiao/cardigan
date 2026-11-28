@@ -168,6 +168,8 @@ export interface ServerGitOptions {
   readonly onSourceError?: (entry: DeliverySourceErrorEntry) => void;
   /** C-642: one line per delivery source publication, with lock wait and hold. */
   readonly onSourceLock?: (entry: DeliverySourceLockEntry) => void;
+  /** C-847: one line per delivery verification with the time of each stage. */
+  readonly onVerifySteps?: (entry: DeliveryVerifyStepsEntry) => void;
   /** C-636: wait/hold time of each project repository lock use. */
   readonly onLockSample?: (sample: RepositoryLockSample) => void;
   /** Test seam for the SSH listing; production uses `agentListChecks`. */
@@ -207,6 +209,13 @@ export interface DeliverySourceLockEntry {
   readonly operation: "verify" | "head";
   readonly wait_ms: number;
   readonly held_ms: number;
+}
+
+export interface DeliveryVerifyStepsEntry {
+  readonly event: "delivery_verify_steps";
+  readonly project_id: string;
+  readonly assignment_id: string;
+  readonly steps_ms: Readonly<Record<string, number>>;
 }
 
 const ERROR_CLASS = /^[A-Za-z][A-Za-z0-9]{0,63}$/u;
@@ -681,6 +690,13 @@ export class ServerGit implements GitBinding {
                 central,
                 project,
                 this.cardBaselineOf(project, assignment),
+                (steps_ms) =>
+                  this.options.onVerifySteps?.({
+                    event: "delivery_verify_steps",
+                    project_id: project.project_id,
+                    assignment_id: assignment.id,
+                    steps_ms,
+                  }),
               ).prepareVerify(subject, assignment, previous),
           );
         } catch (error) {

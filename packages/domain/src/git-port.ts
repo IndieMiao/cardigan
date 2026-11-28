@@ -100,11 +100,26 @@ export interface GitFileDiff {
   readonly old_oid: string;
   readonly new_oid: string;
   readonly status: string;
-  /** Zero-context patch, never an external diff or a text conversion. */
+  /**
+   * Zero-context patch, never an external diff or a text conversion. Empty
+   * when {@link GitFileDiffOptions.content} left this path out.
+   */
   readonly patch: string;
-  /** Unconverted blob text for regular files; absent for links/submodules. */
+  /**
+   * Unconverted blob text for regular files; absent for links/submodules and
+   * for paths {@link GitFileDiffOptions.content} left out.
+   */
   readonly before?: string;
   readonly after?: string;
+}
+/**
+ * C-847: which changed paths need their patch and blob text. Every changed
+ * path is still listed with modes, object ids and status; the content reads
+ * (three Git processes per path) are skipped for the others. Omitted means
+ * every path, as before.
+ */
+export interface GitFileDiffOptions {
+  readonly content?: (path: string) => boolean;
 }
 export interface GitBackupSelection {
   readonly machine: string;
@@ -125,6 +140,7 @@ export interface GitCentralPort {
     repository: string,
     base: string,
     head: string,
+    options?: GitFileDiffOptions,
   ): Promise<readonly GitFileDiff[]>;
   objectFormat(repository: string): Promise<"sha1" | "sha256">;
   objectType(repository: string, sha: string): Promise<string | undefined>;

@@ -12,6 +12,13 @@ const rolePath = (p: string) =>
   /(?:^|[/._-])(?:roles?|prompts?|agents)(?:[/._-]|$)/iu.test(p);
 const prohibited =
   /allowed_tools|capabilities|permission|authoriz|delegat|isolation|review|权限|工具|能力|隔离|审核|复核|验收|代确认|代拍|授权|强制交人|对外发布|放宽|豁免/iu;
+const testCode = (p: string) => /(?:\.test\.[cm]?[jt]sx?|\.snap)$/u.test(p);
+/**
+ * C-847: only role/prompt paths are classified from their patch and text;
+ * every other change is "ordinary" from its path alone, so its content is
+ * never read.
+ */
+export const roleRuleNeedsContent = (p: string) => !testCode(p) && rolePath(p);
 function classify(f: GitFileDiff): RoleRuleChange {
   const base = {
     id: f.path,
@@ -23,8 +30,7 @@ function classify(f: GitFileDiff): RoleRuleChange {
     status: f.status,
   };
   // Test code and snapshots do not compile into a role's prompt.
-  if (/(?:\.test\.[cm]?[jt]sx?|\.snap)$/u.test(f.path))
-    return { ...base, category: "ordinary", edits: [] };
+  if (testCode(f.path)) return { ...base, category: "ordinary", edits: [] };
   // Ordinary business/UI/docs changes retain their existing merge routing.
   // Unknown formats within role/prompt paths still fail closed.
   if (!rolePath(f.path)) return { ...base, category: "ordinary", edits: [] };
@@ -130,7 +136,9 @@ export async function collectRoleRuleInventory(
       complete: false,
       changes: [],
     };
-  const diffs = await git.fileDiffs(repository, base_sha, sha);
+  const diffs = await git.fileDiffs(repository, base_sha, sha, {
+    content: roleRuleNeedsContent,
+  });
   return {
     version: 1,
     base_sha,

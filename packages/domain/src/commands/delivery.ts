@@ -17,7 +17,7 @@ import type {
 import { REVIEW_IMPACTS } from "../entities.js";
 import type { Result } from "../errors.js";
 import { flowAtLeast } from "../flow.js";
-import type { AttachmentId } from "../ids.js";
+import type { AttachmentId, WorkItemId } from "../ids.js";
 import type { DeliveryVerifier } from "../ports.js";
 import { reviewMaxRounds } from "../preferences.js";
 import { hasProbeEvidence } from "../probes.js";
@@ -475,6 +475,42 @@ export function submitDelivery(
     : result;
 }
 
+const deliveryNumber = (v: Pick<Delivery, "id">) => Number(v.id.slice(2));
+/**
+ * C-847: why `supersedes` names no current delivery of this stream, and how
+ * the submitter fixes it. A code delivery supersedes every current delivery
+ * of its work item (completions included); a completion only completions.
+ */
+function staleSupersedes(
+  d: CommandDraft,
+  item: WorkItemId,
+  named: string,
+  completion: boolean,
+  current: readonly Delivery[],
+): string {
+  const stream = completion ? "完成申请" : "产出交付";
+  const fix = current[0]
+    ? `去掉 supersedes，或改成当前有效的${stream} ${current[0].id}`
+    : `当前没有有效的${stream}，去掉 supersedes`;
+  const target = d.list("deliveries").find((v) => v.id === named);
+  if (!target || target.work_item_id !== item)
+    return `${named} 不是本工作项的交付；${fix}`;
+  if (target.status === "superseded") {
+    const targetCompletion = target.kind === "card_completion";
+    const by = d
+      .list("deliveries")
+      .filter(
+        (v) =>
+          v.work_item_id === item &&
+          deliveryNumber(v) > deliveryNumber(target) &&
+          (v.kind !== "card_completion" || targetCompletion),
+      )
+      .sort((a, b) => deliveryNumber(a) - deliveryNumber(b))[0];
+    return `${named} 已${by ? `被 ${by.id} ` : ""}作废，不再是当前有效的交付；${fix}`;
+  }
+  return `${named} 是${target.kind === "card_completion" ? "完成申请" : "产出交付"}，不能被${stream}接替；${fix}`;
+}
+
 /** Internal composition: request_recheck settles both streams in one transaction. */
 export function deliverySubmission(
   params: SubmitDeliveryParams,
@@ -491,7 +527,8 @@ export function deliverySubmission(
       verified?.[proof] &&
         (system || verified.binding === binding(d, p.subject)),
       "stale_target",
-      "Verification must match this assignment, run and subject",
+      // C-847: a slow verification can outlive the Run that asked for it.
+      "Verification must match this assignment, run and subject: 校验期间本 Run、Assignment 登记或提交已变化（例如已 finish_run 或换了新 Run），请在当前 Run 重新提交 submit_delivery",
     );
     // Check the blocker before superseding anything: invalidating a previous
     // delivery must not clear a decision that should prevent this recovery.
@@ -533,7 +570,7 @@ export function deliverySubmission(
     ensure(
       !p.supersedes || predecessors.some((v) => v.id === p.supersedes),
       "stale_target",
-      "supersedes must be a current delivery in the same stream",
+      `supersedes must be a current delivery in the same stream: ${staleSupersedes(d, item.id, p.supersedes ?? "", completion, predecessors)}`,
     );
     const predecessor =
       recheck?.previous ??

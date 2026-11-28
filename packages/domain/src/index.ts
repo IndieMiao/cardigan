@@ -30,6 +30,7 @@ export * from "./commands/decision-followup.js";
 export * from "./commands/decision-suggestion.js";
 export * from "./commands/delegation.js";
 export * from "./commands/delivery.js";
+export * from "./commands/delivery-rejection.js";
 export * from "./commands/delivery-rework.js";
 export * from "./commands/deployment.js";
 export * from "./commands/device-actions.js";

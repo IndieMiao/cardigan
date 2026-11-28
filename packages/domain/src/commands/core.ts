@@ -203,7 +203,9 @@ type CommandName =
   | "clear_released_runtime_refs"
   | "request_worktree_cleanup"
   | "request_held_assignment_resume"
-  | "record_readonly_checkout";
+  | "record_readonly_checkout"
+  | "record_delivery_rejection"
+  | "claim_delivery_rejection";
 export function ensure(
   condition: unknown,
   code: ErrorCode,
@@ -386,6 +388,8 @@ export class CommandDraft {
       "request_held_assignment_resume",
       "clear_released_runtime_refs",
       "record_readonly_checkout",
+      "record_delivery_rejection",
+      "claim_delivery_rejection",
     ].includes(tool);
     // Only recheck_merge maps onto a host_ops tool. abort_dispatch and
     // pause_standing_assignment are host/human-only: host_ops reaches them

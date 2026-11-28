@@ -89,6 +89,13 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
     private readonly central: CentralRepositoryService,
     private readonly project: CentralProject,
     private readonly baselineBranch?: string,
+    /**
+     * C-847: wall time of each verification stage, reported once when the
+     * reads finish (successfully or not). Stage names only, never payloads.
+     */
+    private readonly onSteps?: (
+      steps: Readonly<Record<string, number>>,
+    ) => void,
   ) {
     if (baselineBranch !== undefined && !validCentralBranch(baselineBranch))
       throw new Error("Invalid card baseline branch name");
@@ -230,6 +237,17 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         ),
       };
     let staged: { repository: string; head: string } | undefined;
+    const steps: Record<string, number> = {};
+    const step = async <T>(name: string, run: () => Promise<T>) => {
+      const started = performance.now();
+      try {
+        return await run();
+      } finally {
+        steps[name] = Math.round(
+          (steps[name] ?? 0) + performance.now() - started,
+        );
+      }
+    };
     // A rejected delivery still records the fetched tip, as before C-642.
     const rejected = (
       failure: Result<readonly DeliveryEvidence[]>,
@@ -244,56 +262,75 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
         : { value: failure };
     };
     try {
-      const repository = await this.central.ensureCentral(this.project);
+      const repository = await step("ensure_central", () =>
+        this.central.ensureCentral(this.project),
+      );
       if (
         sha.length !==
-        ((await git.objectFormat(repository)) === "sha1" ? 40 : 64)
+        ((await step("commit_checks", () => git.objectFormat(repository))) ===
+        "sha1"
+          ? 40
+          : 64)
       )
         return rejected(
           validationFailed(
             "Delivery SHA length does not match the repository object format",
           ),
         );
-      const head = await this.fetchTip({ ...a, branch: a.branch }, repository);
+      const branch = a.branch;
+      const head = await step("fetch_tip", () =>
+        this.fetchTip({ ...a, branch }, repository),
+      );
       staged = { repository, head };
-      if ((await git.objectType(repository, sha)) !== "commit")
+      if (
+        (await step("commit_checks", () => git.objectType(repository, sha))) !==
+        "commit"
+      )
         return rejected(
           validationFailed(
             "Delivery SHA is not a commit (missing, tree, blob or tag)",
           ),
         );
-      if (!(await git.isAncestor(repository, sha, head)))
+      if (
+        !(await step("commit_checks", () =>
+          git.isAncestor(repository, sha, head),
+        ))
+      )
         return rejected(
           validationFailed(
             "Delivery SHA is not on the recorded Assignment branch",
           ),
         );
-      const base_sha =
-        a.base_sha ?? (await git.readRef(repository, this.baselineRef));
+      const baseline = await step("commit_checks", () =>
+        git.readRef(repository, this.baselineRef),
+      );
+      const base_sha = a.base_sha ?? baseline;
       if (!base_sha)
         return rejected(validationFailed("Delivery base SHA is unavailable"));
-      const inventory = await collectRoleRuleInventory(
-        git,
-        repository,
-        base_sha,
-        sha,
+      const inventory = await step("role_inventory", () =>
+        collectRoleRuleInventory(git, repository, base_sha, sha),
       );
-      const commits_ahead = await git.countCommits(repository, base_sha, sha);
-      const tree_sha = await git.treeOfCommit(repository, sha);
-      const baseline = await git.readRef(repository, this.baselineRef);
+      const commits_ahead = await step("commit_count", () =>
+        git.countCommits(repository, base_sha, sha),
+      );
+      const tree_sha = inventory.tree_sha;
       // Card-baseline changes already merged into the branch are not this
       // author's risk. Start from the newest baseline commit the branch
       // contains: the tip itself, or the unique merge base when the baseline
       // has moved on since the author last merged it. Keep the original
       // Assignment baseline in commit/role evidence for audit.
       const ownBase = baseline
-        ? await ownChangesBase(git, repository, baseline, sha)
+        ? await step("own_inventory", () =>
+            ownChangesBase(git, repository, baseline, sha),
+          )
         : undefined;
       // A start older than the Assignment baseline only widens the inventory,
       // which stays the conservative side.
       const ownInventory =
         ownBase && ownBase !== base_sha
-          ? await collectRoleRuleInventory(git, repository, ownBase, sha)
+          ? await step("own_inventory", () =>
+              collectRoleRuleInventory(git, repository, ownBase, sha),
+            )
           : undefined;
       const ownPaths: DeliveryEvidence | undefined =
         ownInventory && ownBase && baseline
@@ -315,7 +352,9 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
           : undefined;
       const equivalence =
         previous && baseline
-          ? await reviewEquivalence(git, repository, baseline, previous, sha)
+          ? await step("review_equivalence", () =>
+              reviewEquivalence(git, repository, baseline, previous, sha),
+            )
           : undefined;
       const evidence: readonly DeliveryEvidence[] = [
         ...(equivalence ? [equivalence] : []),
@@ -355,6 +394,12 @@ export class GitDeliveryVerifier implements DeliveryVerifier {
       };
     } catch (error) {
       return rejected(validationFailed(failureMessage(error)));
+    } finally {
+      try {
+        this.onSteps?.(steps);
+      } catch {
+        // A failing log never changes the answer.
+      }
     }
   }
 }
