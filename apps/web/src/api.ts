@@ -1737,9 +1737,12 @@ export interface WorkerPairingDevice {
   readonly cpu?: string;
   readonly cpu_cores?: number;
   readonly memory_bytes?: number;
-  readonly disk_path?: string;
-  readonly disk_total_bytes?: number;
-  readonly disk_free_bytes?: number;
+  /** C-843: one entry per volume; a path on `/`'s volume is left out. */
+  readonly disks?: readonly {
+    readonly path: string;
+    readonly total_bytes: number;
+    readonly free_bytes: number;
+  }[];
   readonly gpu?: string;
 }
 /** A server-side wizard session; it lives 24 hours in the Web process. */
@@ -1760,6 +1763,8 @@ export interface WorkerWizardView {
   readonly steps: readonly WorkerWizardStep[];
   /** Admin commands for the target machine, as text; never run here. */
   readonly commands: Readonly<Record<WorkerWizardCommandKey, string>>;
+  /** C-843: the worker's work root on the target machine. */
+  readonly work_root?: string;
   readonly command_guide: string;
   readonly command_prerequisites: string;
   readonly check_id?: string;

@@ -196,16 +196,42 @@ def gpu_names():
     return printable("; ".join(n for n in names if n), 160)
 
 
-def hardware_facts(os_name, root_readonly):
+# C-843: every place the wizard can put the work root. The Workbench reports
+# the volume of the one it chose, so the device never guesses the layout
+# (SteamOS keeps a small `/` while /home holds the space).
+DISK_CANDIDATES = {"linux": ("/", "/home", "/srv"), "darwin": ("/Users",)}
+
+
+def disk_facts(os_name):
+    """Free and total bytes per candidate volume; a candidate on `/`'s volume
+    is left out and so reads as `/`."""
+    disks = []
+    root = None
+    for path in DISK_CANDIDATES[os_name]:
+        try:
+            dev = os.stat(path).st_dev
+            if path == "/":
+                root = dev
+            elif dev == root:
+                continue
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        if usage.total > 0:
+            disks.append({"path": path, "total_bytes": usage.total, "free_bytes": min(usage.free, usage.total)})
+    return disks
+
+
+def hardware_facts(os_name):
     """C-707: for the Workbench's onboarding report only; best effort, so
     nothing here can stop the pairing."""
     try:
-        return collect_hardware(os_name, root_readonly)
+        return collect_hardware(os_name)
     except Exception:
         return {}
 
 
-def collect_hardware(os_name, root_readonly):
+def collect_hardware(os_name):
     facts = {}
     cpu = cpu_model()
     if cpu:
@@ -216,14 +242,9 @@ def collect_hardware(os_name, root_readonly):
     memory = memory_bytes()
     if memory and memory > 0:
         facts["memory_bytes"] = memory
-    # The volume the worker's work root goes on.
-    disk = "/Users" if os_name == "darwin" else ("/home" if root_readonly else "/")
-    try:
-        usage = shutil.disk_usage(disk)
-        if usage.total > 0:
-            facts.update(disk_path=disk, disk_total_bytes=usage.total, disk_free_bytes=min(usage.free, usage.total))
-    except OSError:
-        pass
+    disks = disk_facts(os_name)
+    if disks:
+        facts["disks"] = disks
     gpu = gpu_names()
     if gpu:
         facts["gpu"] = gpu
@@ -262,7 +283,7 @@ def device_facts(address):
             facts["root_readonly"] = True
     except OSError:
         pass
-    facts.update(hardware_facts(os_name, facts.get("root_readonly", False)))
+    facts.update(hardware_facts(os_name))
     return facts
 
 

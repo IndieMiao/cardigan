@@ -190,3 +190,17 @@ export function loadMachineCapabilityCatalog(
     throw new Error("Machine capability configuration invalid");
   }
 }
+/** C-843: GPU capabilities and the vendor a device's GPU name must show. */
+const GPU_VENDORS: ReadonlyMap<string, RegExp> = new Map([
+  ["gpu.nvidia", /\bnvidia\b/iu],
+  ["gpu.apple", /\bapple\b/iu],
+]);
+/**
+ * Whether to suggest installing `key` on a device that reported the GPU
+ * names `gpu`: a GPU capability needs a GPU of its vendor. Without a report
+ * nothing is known, so nothing is filtered.
+ */
+export function suggestedForGpu(key: string, gpu: string | undefined) {
+  const vendor = GPU_VENDORS.get(key);
+  return !vendor || gpu === undefined || vendor.test(gpu);
+}

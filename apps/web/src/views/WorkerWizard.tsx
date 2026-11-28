@@ -1804,6 +1804,27 @@ const SOURCE = {
 } as const;
 type ReportRow = { item: string; value: string; source: string };
 
+/**
+ * C-843: the volume holding the work root: the longest reported path it is
+ * under, so /home/cardigan-workers reads /home and not a small read-only `/`.
+ * A path missing from the report shares `/`'s volume.
+ */
+export function workDisk(
+  root: string | undefined,
+  disks: WorkerPairingDevice["disks"],
+): string | undefined {
+  const under = (path: string) =>
+    root !== undefined &&
+    (path === "/" || root === path || root.startsWith(`${path}/`));
+  const disk = (disks ?? [])
+    .filter((x) => under(x.path))
+    .sort((a, b) => b.path.length - a.path.length)[0];
+  return (
+    disk &&
+    `可用 ${size(disk.free_bytes)} / 共 ${size(disk.total_bytes)}（${disk.path}）`
+  );
+}
+
 function deviceRows(
   wizard: WorkerWizardView,
   d: WorkerPairingDevice | undefined,
@@ -1826,12 +1847,7 @@ function deviceRows(
       [d?.cpu, d?.cpu_cores && `${d.cpu_cores} 核`].filter(Boolean).join(" · "),
     ),
     fact("内存", d?.memory_bytes ? size(d.memory_bytes) : undefined),
-    fact(
-      "磁盘",
-      d?.disk_total_bytes !== undefined && d.disk_free_bytes !== undefined
-        ? `可用 ${size(d.disk_free_bytes)} / 共 ${size(d.disk_total_bytes)}（${d.disk_path ?? "—"}）`
-        : undefined,
-    ),
+    fact("磁盘", workDisk(wizard.work_root, d?.disks)),
     fact("GPU", d?.gpu),
   ];
 }

@@ -24,7 +24,7 @@ import { changeControl } from "../testing/controls.js";
 import { fakeClient } from "../testing/fixtures.js";
 import { fixtureMachines } from "../testing/machines-fixture.js";
 import { MachinesSettings } from "./MachinesSettings.js";
-import { storedWizard, WorkerWizardDrawer } from "./WorkerWizard.js";
+import { storedWizard, WorkerWizardDrawer, workDisk } from "./WorkerWizard.js";
 
 afterEach(() => {
   cleanup();
@@ -1323,9 +1323,15 @@ const deviceFacts = {
   cpu: "AMD Custom APU 0405",
   cpu_cores: 8,
   memory_bytes: 16 * 1024 ** 3,
-  disk_path: "/home",
-  disk_total_bytes: 512 * 1024 ** 3,
-  disk_free_bytes: 400 * 1024 ** 3,
+  // C-843: SteamOS's small read-only `/` is not where the work root goes.
+  disks: [
+    { path: "/", total_bytes: 5 * 1024 ** 3, free_bytes: 866 * 1024 ** 2 },
+    {
+      path: "/home",
+      total_bytes: 512 * 1024 ** 3,
+      free_bytes: 400 * 1024 ** 3,
+    },
+  ],
 };
 function pairingBackend(runs: (WorkerWizardStep["step"] | "passed")[] = []) {
   const fake = backend(runs);
@@ -1353,6 +1359,7 @@ function pairingBackend(runs: (WorkerWizardStep["step"] | "passed")[] = []) {
         project_id: project,
         device_init: { state: "waiting" },
         device: deviceFacts,
+        work_root: "/home/cardigan-workers/p-1",
         run_limit: { value: body.run_limit, state: "pending" },
       }));
       return {
@@ -1634,6 +1641,29 @@ test("C-707: a QR link's code leaves the address bar at once and opens the pairi
   expect(pendingPairingCode()).toBeUndefined();
   expect(fake.pairWorkerDevice).not.toHaveBeenCalled();
   push.mockRestore();
+});
+
+test("C-843: the disk row reads the volume holding the work root", () => {
+  const G = 1024 ** 3;
+  const disks = [
+    { path: "/", total_bytes: 5 * G, free_bytes: 1024 ** 2 },
+    { path: "/home", total_bytes: 900 * G, free_bytes: 833 * G },
+  ];
+  expect(workDisk("/home/cardigan-workers/p", disks)).toBe(
+    "可用 833 GiB / 共 900 GiB（/home）",
+  );
+  // /srv was not listed: it is on `/`'s volume.
+  expect(workDisk("/srv/cardigan-workers/p", disks)).toBe(
+    "可用 1 MiB / 共 5.0 GiB（/）",
+  );
+  expect(workDisk("/homework/p", disks)).toBe("可用 1 MiB / 共 5.0 GiB（/）");
+  expect(
+    workDisk("/Users/cardigan-workers/p", [
+      { path: "/Users", total_bytes: 500 * G, free_bytes: 200 * G },
+    ]),
+  ).toBe("可用 200 GiB / 共 500 GiB（/Users）");
+  expect(workDisk(undefined, disks)).toBeUndefined();
+  expect(workDisk("/home/cardigan-workers/p", undefined)).toBeUndefined();
 });
 
 test("C-707: a hand-filled wizard's report names what was not collected", async () => {
